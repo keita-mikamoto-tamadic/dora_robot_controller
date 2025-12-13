@@ -1,0 +1,10 @@
+{
+  "robot_name": "mimic_v1",
+  "axis_count": 4,
+  "axes": [
+    {"index": 1, "name": "hip_pitch_R", "device_id": 1, "motdir": -1, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
+    {"index": 2, "name": "wheel_R", "device_id": 2, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
+    {"index": 3, "name": "hip_pitch_L", "device_id": 3, "motdir": -1, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
+    {"index": 4, "name": "wheel_L", "device_id": 4, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0}
+  ]
+}

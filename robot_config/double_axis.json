@@ -1,0 +1,8 @@
+{
+  "robot_name": "double_axis",
+  "axis_count": 2,
+  "axes": [
+    {"index": 1, "name": "test_motor1", "device_id": 1, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
+    {"index": 2, "name": "test_motor2", "device_id": 2, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0}
+  ]
+}

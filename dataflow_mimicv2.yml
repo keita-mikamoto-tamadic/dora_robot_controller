@@ -1,0 +1,51 @@
+nodes:
+  # CUI - multi-axis motor controller (dynamic node)
+  # Start with: ROBOT_CONFIG=robot_config/single_axis.json python3 python/cui/simple_motor_controller/cui_node.py
+  - id: cui
+    path: dynamic
+    inputs:
+      cycle_time_us: canfd_txrx/cycle_time_us
+      motor_torques: moteus_communication/motor_torques
+    outputs:
+      - robot_config
+      - servo_on
+      - servo_off
+      - velocity_limit
+      - accel_limit
+      - torque_limit
+
+  # Moteus Communication - protocol handling + frame routing
+  - id: moteus_communication
+    path: cpp/communications/comm_manager/moteus_communication/moteus_communication_node
+    inputs:
+      tick: dora/timer/millis/10
+      robot_config: cui/robot_config
+      rx_frames: canfd_txrx/rx_frames
+      servo_on: cui/servo_on
+      servo_off: cui/servo_off
+      velocity_limit: cui/velocity_limit
+      accel_limit: cui/accel_limit
+      torque_limit: cui/torque_limit
+    outputs:
+      - axis_config
+      - can_frames
+      - motor_torques
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+      RT_PRIORITY: "80"
+
+  # CANFD TX/RX - sends CAN frames and waits for response
+  - id: canfd_txrx
+    path: cpp/communications/canfd/canfd_txrx/canfd_txrx_node
+    inputs:
+      axis_config: moteus_communication/axis_config
+      can_frames: moteus_communication/can_frames
+    outputs:
+      - rx_frames
+      - cycle_time_us
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+      CAN_INTERFACE: "can0"
+      RX_TIMEOUT_US: "3000"
+      CPU_AFFINITY: "1"
+      RT_PRIORITY: "80"

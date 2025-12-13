@@ -1,0 +1,49 @@
+nodes:
+  # GUI - multi-axis motor controller (dynamic node)
+  # Start with: ROBOT_CONFIG=robot_config/triple_axis.json python3 python/gui/simple_motor_controller/simple_gui_node.py
+  - id: gui
+    path: dynamic
+    inputs:
+      cycle_time_us: canfd_txrx/cycle_time_us
+      motor_status: moteus_communication/motor_status
+    outputs:
+      - robot_config
+      - servo_on
+      - servo_off
+      - set_zero
+      - position_command
+
+  # Moteus Communication - protocol handling + frame routing
+  - id: moteus_communication
+    path: cpp/communications/comm_manager/moteus_communication/moteus_communication_node
+    inputs:
+      tick: dora/timer/millis/10
+      robot_config: gui/robot_config
+      rx_frames: canfd_txrx/rx_frames
+      servo_on: gui/servo_on
+      servo_off: gui/servo_off
+      set_zero: gui/set_zero
+      position_command: gui/position_command
+    outputs:
+      - axis_config
+      - can_frames
+      - motor_status
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+      RT_PRIORITY: "80"
+
+  # CANFD TX/RX - sends CAN frames and waits for response
+  - id: canfd_txrx
+    path: cpp/communications/canfd/canfd_txrx/canfd_txrx_node
+    inputs:
+      axis_config: moteus_communication/axis_config
+      can_frames: moteus_communication/can_frames
+    outputs:
+      - rx_frames
+      - cycle_time_us
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+      CAN_INTERFACE: "can0"
+      RX_TIMEOUT_US: "3000"
+      CPU_AFFINITY: "1"
+      RT_PRIORITY: "80"

@@ -1,0 +1,9 @@
+{
+  "robot_name": "triple_axis",
+  "axis_count": 3,
+  "axes": [
+    {"index": 1, "name": "motor1", "device_id": 1, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 2.0, "torque_limit": 10.0},
+    {"index": 2, "name": "motor2", "device_id": 2, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 2.0, "torque_limit": 10.0},
+    {"index": 3, "name": "motor3", "device_id": 3, "motdir": 1, "velocity_limit": 100.0, "accel_limit": 2.0, "torque_limit": 10.0}
+  ]
+}
