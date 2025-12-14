@@ -6,6 +6,7 @@ import os
 import json
 import struct
 import queue
+import threading
 from dora import Node
 
 import tkinter as tk
@@ -342,52 +343,61 @@ def main():
     robot_config = load_robot_config()
     node = Node("gui")
 
-    config_json = json.dumps(robot_config)
-    node.send_output("robot_config", config_json.encode('utf-8'))
-    print("[gui] Sent robot_config")
+    cmd_queue = queue.Queue()  # GUI -> dora thread
+    status_queue = queue.Queue()  # dora thread -> GUI
 
-    cmd_queue = queue.Queue()
     root = tk.Tk()
     gui = MotorControlGUI(root, robot_config, cmd_queue)
 
-    def process_events():
-        if not gui.running:
-            return
+    # Dora event processing in separate thread
+    def dora_thread():
+        config_sent = False
+        while gui.running:
+            # Process commands from GUI
+            try:
+                while True:
+                    cmd, data = cmd_queue.get_nowait()
+                    if cmd == "servo_on":
+                        node.send_output("servo_on", bytes([data]))
+                    elif cmd == "servo_off":
+                        node.send_output("servo_off", bytes([data]))
+                    elif cmd == "set_zero":
+                        node.send_output("set_zero", bytes([data]))
+                    elif cmd == "go_position":
+                        axis_index, pos = data
+                        payload = struct.pack('B', axis_index) + struct.pack('d', pos)
+                        node.send_output("position_command", payload)
+                    elif cmd == "quit":
+                        return
+            except queue.Empty:
+                pass
 
-        # Process commands from GUI
-        try:
-            while True:
-                cmd, data = cmd_queue.get_nowait()
-                if cmd == "servo_on":
-                    node.send_output("servo_on", bytes([data]))
-                elif cmd == "servo_off":
-                    node.send_output("servo_off", bytes([data]))
-                elif cmd == "set_zero":
-                    node.send_output("set_zero", bytes([data]))
-                elif cmd == "go_position":
-                    axis_index, pos = data
-                    # Format: [1 byte axis_index][8 bytes position (double)]
-                    payload = struct.pack('B', axis_index) + struct.pack('d', pos)
-                    node.send_output("position_command", payload)
-                elif cmd == "quit":
-                    return
-        except queue.Empty:
-            pass
+            # Process dora events
+            try:
+                event = node.next(timeout=0.005)
+                if event is None:
+                    continue
 
-        # Process dora events
-        try:
-            event = node.next(timeout=0.01)
-            if event is not None:
                 if event["type"] == "STOP":
                     print("[gui] Received stop signal")
-                    gui.quit_app()
+                    status_queue.put(("stop", None))
                     return
                 elif event["type"] == "INPUT":
-                    if event["id"] == "cycle_time_us":
+                    if event["id"] == "tick":
+                        # Send robot_config on first tick
+                        if not config_sent:
+                            config_json = json.dumps(robot_config)
+                            node.send_output("robot_config", config_json.encode('utf-8'))
+                            print("[gui] Sent robot_config")
+                            config_sent = True
+                        # Forward tick as query to moteus_communication
+                        node.send_output("query", bytes([0]))
+
+                    elif event["id"] == "cycle_time_us":
                         raw = bytes(event["value"].to_pylist())
                         if len(raw) >= 8:
                             cycle_us = struct.unpack('q', raw[:8])[0]
-                            gui.update_cycle_time(cycle_us)
+                            status_queue.put(("cycle_time", cycle_us))
 
                     elif event["id"] == "motor_status":
                         raw = bytes(event["value"].to_pylist())
@@ -395,7 +405,6 @@ def main():
                             count = raw[0]
                             statuses = []
                             offset = 1
-                            # Per axis: mode(1) + pos(8) + vel(8) + d_cur(8) + q_cur(8) + torq(8) + temp(8) = 49 bytes
                             for i in range(count):
                                 if offset + 49 <= len(raw):
                                     mode = raw[offset]
@@ -417,13 +426,33 @@ def main():
                                         'd_current': d_cur, 'q_current': q_cur,
                                         'torque': torq, 'motor_temp': temp
                                     })
-                            gui.update_motor_status(statuses)
-        except Exception as e:
-            print(f"[gui] Event error: {e}")
+                            status_queue.put(("motor_status", statuses))
+            except Exception as e:
+                print(f"[gui] Dora error: {e}")
 
-        root.after(10, process_events)
+    # GUI update from status_queue
+    def update_gui():
+        if not gui.running:
+            return
+        try:
+            while True:
+                msg_type, data = status_queue.get_nowait()
+                if msg_type == "stop":
+                    gui.quit_app()
+                    return
+                elif msg_type == "cycle_time":
+                    gui.update_cycle_time(data)
+                elif msg_type == "motor_status":
+                    gui.update_motor_status(data)
+        except queue.Empty:
+            pass
+        root.after(10, update_gui)
 
-    root.after(10, process_events)
+    # Start dora thread
+    thread = threading.Thread(target=dora_thread, daemon=True)
+    thread.start()
+
+    root.after(10, update_gui)
     root.mainloop()
     print("[gui] Finished")
 

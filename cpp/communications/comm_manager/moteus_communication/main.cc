@@ -391,7 +391,7 @@ int main()
                     }
                 }
             }
-            else if (input_id == "tick")
+            else if (input_id == "tick" || input_id == "query")
             {
                 if (g_config_received)
                 {

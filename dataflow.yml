@@ -4,6 +4,7 @@ nodes:
   - id: gui
     path: dynamic
     inputs:
+      tick: dora/timer/millis/10
       cycle_time_us: canfd_txrx/cycle_time_us
       motor_status: moteus_communication/motor_status
     outputs:
@@ -12,12 +13,13 @@ nodes:
       - servo_off
       - set_zero
       - position_command
+      - query
 
   # Moteus Communication - protocol handling + frame routing
   - id: moteus_communication
     path: cpp/communications/comm_manager/moteus_communication/moteus_communication_node
     inputs:
-      tick: dora/timer/millis/10
+      query: gui/query
       robot_config: gui/robot_config
       rx_frames: canfd_txrx/rx_frames
       servo_on: gui/servo_on
