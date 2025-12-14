@@ -6,6 +6,7 @@ import os
 import json
 import struct
 import queue
+import threading
 from dora import Node
 
 import tkinter as tk
@@ -235,38 +236,40 @@ def main():
     robot_config = load_robot_config()
     node = Node("robot_control_gui")
 
-    # Send robot_config to state_manager
-    config_json = json.dumps(robot_config)
-    node.send_output("robot_config", config_json.encode('utf-8'))
-    print("[gui] Sent robot_config")
+    cmd_queue = queue.Queue()  # GUI -> dora thread
+    status_queue = queue.Queue()  # dora thread -> GUI
 
-    cmd_queue = queue.Queue()
     root = tk.Tk()
     gui = RobotControlGUI(root, robot_config, cmd_queue)
 
-    def process_events():
-        if not gui.running:
-            return
+    # Dora event processing in separate thread
+    def dora_thread():
+        # Send robot_config immediately at thread start
+        config_json = json.dumps(robot_config)
+        node.send_output("robot_config", config_json.encode('utf-8'))
+        print("[gui] Sent robot_config")
 
-        # Process commands from GUI
-        try:
-            while True:
-                cmd, data = cmd_queue.get_nowait()
-                if cmd == "state_command":
-                    # Format: [1 byte command]
-                    node.send_output("state_command", bytes([data]))
-                elif cmd == "quit":
-                    return
-        except queue.Empty:
-            pass
+        while gui.running:
+            # Process commands from GUI
+            try:
+                while True:
+                    cmd, data = cmd_queue.get_nowait()
+                    if cmd == "state_command":
+                        node.send_output("state_command", bytes([data]))
+                    elif cmd == "quit":
+                        return
+            except queue.Empty:
+                pass
 
-        # Process dora events
-        try:
-            event = node.next(timeout=0.01)
-            if event is not None:
+            # Process dora events
+            try:
+                event = node.next(timeout=0.005)
+                if event is None:
+                    continue
+
                 if event["type"] == "STOP":
                     print("[gui] Received stop signal")
-                    gui.quit_app()
+                    status_queue.put(("stop", None))
                     return
                 elif event["type"] == "INPUT":
                     if event["id"] == "state_status":
@@ -274,7 +277,7 @@ def main():
                         if len(raw) >= 2:
                             state = raw[0]
                             progress = raw[1]
-                            gui.update_state_status(state, progress)
+                            status_queue.put(("state_status", (state, progress)))
 
                     elif event["id"] == "motor_display":
                         raw = bytes(event["value"].to_pylist())
@@ -298,14 +301,36 @@ def main():
                                     torques.append(torq)
                                     offset += 8
 
-                            gui.update_motor_display(positions, torques)
+                            status_queue.put(("motor_display", (positions, torques)))
 
-        except Exception as e:
-            print(f"[gui] Event error: {e}")
+            except Exception as e:
+                print(f"[gui] Dora error: {e}")
 
-        root.after(10, process_events)
+    # GUI update from status_queue
+    def update_gui():
+        if not gui.running:
+            return
+        try:
+            while True:
+                msg_type, data = status_queue.get_nowait()
+                if msg_type == "stop":
+                    gui.quit_app()
+                    return
+                elif msg_type == "state_status":
+                    state, progress = data
+                    gui.update_state_status(state, progress)
+                elif msg_type == "motor_display":
+                    positions, torques = data
+                    gui.update_motor_display(positions, torques)
+        except queue.Empty:
+            pass
+        root.after(10, update_gui)
 
-    root.after(10, process_events)
+    # Start dora thread
+    thread = threading.Thread(target=dora_thread, daemon=True)
+    thread.start()
+
+    root.after(10, update_gui)
     root.mainloop()
     print("[gui] Finished")
 

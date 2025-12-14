@@ -386,8 +386,24 @@ int main()
                     if (axis_index < g_axes.size())
                     {
                         g_axes[axis_index].hold_position = position;
-                        std::cout << "[moteus_communication] Position command: axis=" << static_cast<int>(axis_index)
-                                  << ", pos=" << position << std::endl;
+                    }
+                }
+            }
+            else if (input_id == "position_commands")
+            {
+                // Batch position commands for all axes
+                // Format: [1 byte count][pos0 (8 bytes)][pos1 (8 bytes)]...
+                if (g_config_received && data_len >= 1)
+                {
+                    uint8_t count = static_cast<uint8_t>(data_ptr[0]);
+                    size_t offset = 1;
+                    for (uint8_t i = 0; i < count && i < g_axes.size(); ++i)
+                    {
+                        if (offset + sizeof(double) > data_len) break;
+                        double position;
+                        std::memcpy(&position, data_ptr + offset, sizeof(double));
+                        g_axes[i].hold_position = position;
+                        offset += sizeof(double);
                     }
                 }
             }

@@ -11,7 +11,7 @@ TARGET = mimicv2_state_manager_node
 
 all: $(TARGET)
 
-SRCS = main.cc timing_manager.cc
+SRCS = main.cc timing_manager.cc helpers.cc state_init.cc state_ready.cc state_stop.cc state_run.cc
 
 $(TARGET): $(SRCS)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
