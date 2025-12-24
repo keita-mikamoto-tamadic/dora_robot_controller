@@ -14,7 +14,7 @@ nodes:
   - id: mimicv2_state_manager
     path: cpp/state_machine/mimicv2_state_manager/mimicv2_state_manager_node
     inputs:
-      tick: dora/timer/millis/4
+      tick: dora/timer/millis/5
       robot_config: robot_control_gui/robot_config
       motor_status: moteus_communication/motor_status
       state_command: robot_control_gui/state_command

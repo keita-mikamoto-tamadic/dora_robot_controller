@@ -65,8 +65,7 @@ size_t build_position_frame(uint8_t* buffer, int motor_id, double position, doub
     // Also request query with extended data
     Query::Format query_fmt;
     query_fmt.q_current = Resolution::kFloat;
-    query_fmt.d_current = Resolution::kFloat;
-    query_fmt.motor_temperature = Resolution::kFloat;
+    // d_current and motor_temperature removed for faster communication
     Query::Make(&writer, query_fmt);
 
     // Pack: [4 bytes arb_id][1 byte len][data...]
@@ -98,8 +97,7 @@ size_t build_stop_frame(uint8_t* buffer, int motor_id)
     // Also request query with extended data (so we get status even when stopped)
     Query::Format query_fmt;
     query_fmt.q_current = Resolution::kFloat;
-    query_fmt.d_current = Resolution::kFloat;
-    query_fmt.motor_temperature = Resolution::kFloat;
+    // d_current and motor_temperature removed for faster communication
     Query::Make(&writer, query_fmt);
 
     // Pack: [4 bytes arb_id][1 byte len][data...]

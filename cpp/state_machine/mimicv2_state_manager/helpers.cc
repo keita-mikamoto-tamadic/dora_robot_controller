@@ -29,18 +29,6 @@ void send_servo_off(void* dora_context, uint8_t mask)
     std::cout << "[state_manager] Servo OFF mask: 0x" << std::hex << static_cast<int>(mask) << std::dec << std::endl;
 }
 
-void send_position_command(void* dora_context, uint8_t axis_index, double position)
-{
-    uint8_t buffer[9];
-    buffer[0] = axis_index;
-    std::memcpy(buffer + 1, &position, sizeof(double));
-
-    std::string output_id = "position_command";
-    dora_send_output(dora_context,
-                     const_cast<char*>(output_id.c_str()), output_id.length(),
-                     reinterpret_cast<char*>(buffer), 9);
-}
-
 void send_position_commands(void* dora_context, const std::vector<double>& positions)
 {
     // Format: [1 byte count][pos0 (8 bytes)][pos1 (8 bytes)]...

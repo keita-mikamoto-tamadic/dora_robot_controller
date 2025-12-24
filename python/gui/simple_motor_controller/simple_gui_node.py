@@ -324,7 +324,7 @@ class MotorControlGUI:
 
 
 def load_robot_config():
-    config_path = os.environ.get("ROBOT_CONFIG", "robot_config/single_axis.json")
+    config_path = os.environ.get("ROBOT_CONFIG", "robot_config/mimic_v2.json")
     if not os.path.isabs(config_path):
         config_path = os.path.join(os.getcwd(), config_path)
     try:
