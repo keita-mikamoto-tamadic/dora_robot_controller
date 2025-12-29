@@ -6,6 +6,9 @@ void cmd_ready(void* dora_context);
 // tick時の補間処理
 void tick_interpolation(void* dora_context);
 
+// tick時のREADY状態保持（補間完了後）
+void tick_ready_hold(void* dora_context);
+
 // 補間開始
 void start_interpolation();
 

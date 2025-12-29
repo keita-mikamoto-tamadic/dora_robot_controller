@@ -11,8 +11,8 @@ TARGET = moteus_communication_node
 
 all: $(TARGET)
 
-$(TARGET): main.cc
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
+$(TARGET): main.cc rad_converter.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) main.cc rad_converter.cpp -o $@ $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) *.o

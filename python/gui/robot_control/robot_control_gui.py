@@ -25,6 +25,7 @@ STATE_CMD_SERVO_OFF = 0
 STATE_CMD_STOP = 1
 STATE_CMD_READY = 2
 STATE_CMD_RUN = 3
+STATE_CMD_INIT_POSITION_RESET = 4
 
 
 class RobotControlGUI:
@@ -76,11 +77,28 @@ class RobotControlGUI:
                                      foreground="gray")
         self.state_label.pack(side=tk.LEFT, padx=10)
 
+        # Init Position Reset button (right side)
+        self.init_reset_btn = ttk.Button(state_inner, text="Init Position Reset",
+                                         command=self.init_position_reset_cmd, width=18)
+        self.init_reset_btn.pack(side=tk.RIGHT, padx=5)
+
         # Progress bar (for READY interpolation)
         self.progress_var = tk.IntVar(value=0)
         self.progress_bar = ttk.Progressbar(state_frame, variable=self.progress_var,
                                             maximum=100, length=200)
         self.progress_bar.pack(fill=tk.X, pady=(5, 0))
+
+        # IMU display
+        imu_inner = ttk.Frame(state_frame)
+        imu_inner.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Label(imu_inner, text="IMU:", font=("Helvetica", 10)).pack(side=tk.LEFT)
+        self.imu_roll_label = ttk.Label(imu_inner, text="R:  0.00", font=("Courier", 10), width=10)
+        self.imu_roll_label.pack(side=tk.LEFT, padx=5)
+        self.imu_pitch_label = ttk.Label(imu_inner, text="P:  0.00", font=("Courier", 10), width=10)
+        self.imu_pitch_label.pack(side=tk.LEFT, padx=5)
+        self.imu_yaw_label = ttk.Label(imu_inner, text="Y:  0.00", font=("Courier", 10), width=10)
+        self.imu_yaw_label.pack(side=tk.LEFT, padx=5)
 
         # Control buttons frame
         btn_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
@@ -117,7 +135,7 @@ class RobotControlGUI:
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(header_frame, text="Name", width=15, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Position (rev)", width=15, anchor=tk.CENTER,
+        ttk.Label(header_frame, text="Position (rad)", width=15, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(header_frame, text="Torque (Nm)", width=15, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
@@ -179,6 +197,10 @@ class RobotControlGUI:
         print("[gui] Run command")
         self.cmd_queue.put(("state_command", STATE_CMD_RUN))
 
+    def init_position_reset_cmd(self):
+        print("[gui] Init Position Reset command")
+        self.cmd_queue.put(("state_command", STATE_CMD_INIT_POSITION_RESET))
+
     def quit_app(self):
         print("[gui] Quit")
         self.running = False
@@ -214,6 +236,12 @@ class RobotControlGUI:
             self.row_labels[i]['position'].config(text=f"{positions[i]:.4f}")
         for i in range(min(len(torques), len(self.row_labels))):
             self.row_labels[i]['torque'].config(text=f"{torques[i]:.4f}")
+
+    def update_imu_display(self, roll, pitch, yaw):
+        """Update IMU display (angles in radians)"""
+        self.imu_roll_label.config(text=f"R:{roll:7.4f}")
+        self.imu_pitch_label.config(text=f"P:{pitch:7.4f}")
+        self.imu_yaw_label.config(text=f"Y:{yaw:7.4f}")
 
 
 def load_robot_config():
@@ -303,6 +331,17 @@ def main():
 
                             status_queue.put(("motor_display", (positions, torques)))
 
+                    elif event["id"] == "imu_data":
+                        # IMU data: [valid(1)][q0-q3(16)][gx-gz(12)][ax-az(12)][roll,pitch,yaw(12)][timestamp(8)]
+                        raw = bytes(event["value"].to_pylist())
+                        if len(raw) >= 61:
+                            # Skip to roll, pitch, yaw (offset 41)
+                            offset = 1 + 16 + 12 + 12  # valid + quat + gyro + accel = 41
+                            roll = struct.unpack('f', raw[offset:offset+4])[0]
+                            pitch = struct.unpack('f', raw[offset+4:offset+8])[0]
+                            yaw = struct.unpack('f', raw[offset+8:offset+12])[0]
+                            status_queue.put(("imu_data", (roll, pitch, yaw)))
+
             except Exception as e:
                 print(f"[gui] Dora error: {e}")
 
@@ -322,6 +361,9 @@ def main():
                 elif msg_type == "motor_display":
                     positions, torques = data
                     gui.update_motor_display(positions, torques)
+                elif msg_type == "imu_data":
+                    roll, pitch, yaw = data
+                    gui.update_imu_display(roll, pitch, yaw)
         except queue.Empty:
             pass
         root.after(10, update_gui)

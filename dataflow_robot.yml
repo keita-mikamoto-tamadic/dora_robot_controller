@@ -1,4 +1,14 @@
 nodes:
+  # IMU Node - Spresense IMU serial communication (1ms push)
+  - id: imu_node
+    path: cpp/sensor/imu/sony/imu_node
+    inputs:
+      tick: dora/timer/millis/1
+    outputs:
+      - imu_data
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+
   # Robot Control GUI - state machine control interface (dynamic node)
   # Start with: ROBOT_CONFIG=robot_config/triple_axis.json python3 python/gui/robot_control/robot_control_gui.py
   - id: robot_control_gui
@@ -6,6 +16,7 @@ nodes:
     inputs:
       state_status: mimicv2_state_manager/state_status
       motor_display: mimicv2_state_manager/motor_display
+      imu_data: imu_node/imu_data
     outputs:
       - robot_config
       - state_command
@@ -18,14 +29,17 @@ nodes:
       robot_config: robot_control_gui/robot_config
       motor_status: moteus_communication/motor_status
       state_command: robot_control_gui/state_command
+      imu_data: imu_node/imu_data
     outputs:
       - robot_config_out
       - servo_on
       - servo_off
       - position_commands
+      - velocity_commands
       - state_status
       - motor_display
       - query
+      - set_position
     env:
       LD_LIBRARY_PATH: "${PWD}/lib"
 
@@ -39,6 +53,8 @@ nodes:
       servo_on: mimicv2_state_manager/servo_on
       servo_off: mimicv2_state_manager/servo_off
       position_commands: mimicv2_state_manager/position_commands
+      velocity_commands: mimicv2_state_manager/velocity_commands
+      set_position: mimicv2_state_manager/set_position
     outputs:
       - axis_config
       - can_frames
@@ -59,6 +75,6 @@ nodes:
     env:
       LD_LIBRARY_PATH: "${PWD}/lib"
       CAN_INTERFACE: "can0"
-      RX_TIMEOUT_US: "3000"
+      RX_TIMEOUT_US: "8000"
       CPU_AFFINITY: "1"
       RT_PRIORITY: "80"

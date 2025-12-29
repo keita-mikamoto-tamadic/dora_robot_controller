@@ -14,6 +14,7 @@ extern "C"
 
 #include "mjbots/moteus/moteus_protocol.h"
 #include "nlohmann/json.hpp"
+#include "rad_converter.hpp"
 
 using namespace mjbots::moteus;
 using json = nlohmann::json;
@@ -30,6 +31,8 @@ struct AxisConfig
     double velocity_limit;  // rev/s
     double accel_limit;     // rev/s^2
     double torque_limit;    // Nm
+    int8_t previous_fault;   // Previous fault code for change detection
+    int servo_on_delay;      // Cycles to wait before sending position commands after servo_on
 };
 
 // Static configuration (set once on robot_config input)
@@ -65,6 +68,7 @@ size_t build_position_frame(uint8_t* buffer, int motor_id, double position, doub
     // Also request query with extended data
     Query::Format query_fmt;
     query_fmt.q_current = Resolution::kFloat;
+    query_fmt.fault = Resolution::kInt8;  // Request fault code
     // d_current and motor_temperature removed for faster communication
     Query::Make(&writer, query_fmt);
 
@@ -83,13 +87,109 @@ size_t build_position_frame(uint8_t* buffer, int motor_id, double position, doub
     return offset;
 }
 
-// Build stop command frame using StopMode from moteus_protocol.h
-size_t build_stop_frame(uint8_t* buffer, int motor_id)
+// Build velocity command frame for moteus (position=NaN, velocity=specified)
+// For pure velocity control: position is NaN, velocity is the target rate
+size_t build_velocity_frame(uint8_t* buffer, int motor_id, double velocity,
+                            double kp_scale, double kd_scale,
+                            double velocity_limit, double accel_limit, double torque_limit)
 {
     CanData frame;
     WriteCanData writer(&frame);
 
-    // Use the official StopMode::Make
+    // Position mode command with NaN position for velocity control
+    PositionMode::Command cmd;
+    cmd.position = std::numeric_limits<double>::quiet_NaN();  // Use current position
+    cmd.velocity = velocity;  // Target velocity in rev/s
+    cmd.maximum_torque = torque_limit;
+    cmd.feedforward_torque = 0.0;
+    cmd.kp_scale = kp_scale;  // 0.0 for pure velocity control
+    cmd.kd_scale = kd_scale;
+    cmd.stop_position = std::numeric_limits<double>::quiet_NaN();
+    cmd.watchdog_timeout = std::numeric_limits<double>::quiet_NaN();
+    cmd.velocity_limit = velocity_limit;
+    cmd.accel_limit = accel_limit;
+
+    PositionMode::Format fmt;
+    fmt.maximum_torque = Resolution::kFloat;
+    fmt.velocity_limit = Resolution::kFloat;
+    fmt.accel_limit = Resolution::kFloat;
+    fmt.kp_scale = Resolution::kFloat;
+    fmt.kd_scale = Resolution::kFloat;
+    PositionMode::Make(&writer, cmd, fmt);
+
+    // Also request query with extended data
+    Query::Format query_fmt;
+    query_fmt.q_current = Resolution::kFloat;
+    query_fmt.fault = Resolution::kInt8;
+    Query::Make(&writer, query_fmt);
+
+    // Pack: [4 bytes arb_id][1 byte len][data...]
+    size_t offset = 0;
+    uint32_t arb_id = 0x8000 | motor_id;
+    std::memcpy(buffer + offset, &arb_id, 4);
+    offset += 4;
+
+    buffer[offset] = frame.size;
+    offset += 1;
+
+    std::memcpy(buffer + offset, frame.data, frame.size);
+    offset += frame.size;
+
+    return offset;
+}
+
+// Build NaN position control frame (stop = hold current position)
+// This is what we call "stop" mode: position control with NaN position
+size_t build_nan_position_frame(uint8_t* buffer, int motor_id)
+{
+    CanData frame;
+    WriteCanData writer(&frame);
+
+    // Use PositionMode with NaN position = "hold current position"
+    PositionMode::Command cmd;
+    cmd.position = std::numeric_limits<double>::quiet_NaN();  // Current position
+    cmd.velocity = 0.0;
+    cmd.maximum_torque = std::numeric_limits<double>::quiet_NaN();  // Default torque limit
+    cmd.feedforward_torque = 0.0;
+    cmd.kp_scale = 1.0;
+    cmd.kd_scale = 1.0;
+    cmd.stop_position = std::numeric_limits<double>::quiet_NaN();
+    cmd.watchdog_timeout = std::numeric_limits<double>::quiet_NaN();
+    cmd.velocity_limit = std::numeric_limits<double>::quiet_NaN();
+    cmd.accel_limit = std::numeric_limits<double>::quiet_NaN();
+
+    PositionMode::Format fmt;
+    PositionMode::Make(&writer, cmd, fmt);
+
+    // Also request query
+    Query::Format query_fmt;
+    query_fmt.q_current = Resolution::kFloat;
+    query_fmt.fault = Resolution::kInt8;
+    Query::Make(&writer, query_fmt);
+
+    // Pack: [4 bytes arb_id][1 byte len][data...]
+    size_t offset = 0;
+    uint32_t arb_id = 0x8000 | motor_id;
+    std::memcpy(buffer + offset, &arb_id, 4);
+    offset += 4;
+
+    buffer[offset] = frame.size;
+    offset += 1;
+
+    std::memcpy(buffer + offset, frame.data, frame.size);
+    offset += frame.size;
+
+    return offset;
+}
+
+// Build servo_off frame (complete power-off, no torque)
+// Renamed from build_stop_frame() to clarify: this is servo_off, not "stop"
+size_t build_servo_off_frame(uint8_t* buffer, int motor_id)
+{
+    CanData frame;
+    WriteCanData writer(&frame);
+
+    // Use StopMode::Make for servo_off (power-off, no control)
     StopMode::Command cmd;
     StopMode::Format fmt;
     StopMode::Make(&writer, cmd, fmt);
@@ -97,6 +197,7 @@ size_t build_stop_frame(uint8_t* buffer, int motor_id)
     // Also request query with extended data (so we get status even when stopped)
     Query::Format query_fmt;
     query_fmt.q_current = Resolution::kFloat;
+    query_fmt.fault = Resolution::kInt8;  // Request fault code
     // d_current and motor_temperature removed for faster communication
     Query::Make(&writer, query_fmt);
 
@@ -160,8 +261,8 @@ void send_axis_config(void* dora_context)
                      const_cast<char*>(output_id.c_str()), output_id.length(),
                      reinterpret_cast<char*>(buffer), offset);
 }
-// Build stop frames for all axes
-void send_all_stop_frames(void* dora_context)
+// Build servo_off frames for all axes
+void send_all_servo_off_frames(void* dora_context)
 {
     uint8_t buffer[1024];
     size_t offset = 0;
@@ -170,7 +271,7 @@ void send_all_stop_frames(void* dora_context)
 
     for (const auto& axis : g_axes)
     {
-        size_t frame_len = build_stop_frame(buffer + offset, axis.device_id);
+        size_t frame_len = build_servo_off_frame(buffer + offset, axis.device_id);
         offset += frame_len;
     }
 
@@ -237,7 +338,7 @@ int main()
             std::cout << "[moteus_communication] Received stop signal" << std::endl;
             if (g_config_received)
             {
-                send_all_stop_frames(dora_context);
+                send_all_servo_off_frames(dora_context);
             }
             free_dora_event(event);
             break;
@@ -273,6 +374,8 @@ int main()
                             axis.motdir = axis_json["motdir"].get<int>();
                             axis.hold_position = std::numeric_limits<double>::quiet_NaN();
                             axis.current_position = std::numeric_limits<double>::quiet_NaN();
+                            axis.previous_fault = 0;  // Initialize fault tracking
+                            axis.servo_on_delay = 0;  // Initialize servo_on delay counter
                             // Per-axis limits (with defaults)
                             axis.velocity_limit = axis_json.value("velocity_limit", 2.0);
                             axis.accel_limit = axis_json.value("accel_limit", 10.0);
@@ -315,7 +418,11 @@ int main()
                     {
                         if ((mask & (1 << i)) && !(servo_on_mask & (1 << i)))
                         {
-                            g_axes[i].hold_position = std::numeric_limits<double>::quiet_NaN();
+                            // Set delay to send NaN position control for a few cycles
+                            g_axes[i].servo_on_delay = 5;  // Wait 5 cycles before specific position commands
+                            g_axes[i].hold_position = std::numeric_limits<double>::quiet_NaN();  // Reset to NaN
+                            std::cout << "[moteus_communication] Axis " << i << " (device_id=" << static_cast<int>(g_axes[i].device_id)
+                                      << ") servo_on_delay set to 5 (will send NaN position control)" << std::endl;
                         }
                     }
                     servo_on_mask |= mask;
@@ -383,7 +490,8 @@ int main()
 
                     if (axis_index < g_axes.size())
                     {
-                        g_axes[axis_index].hold_position = position;
+                        // Convert from radians (GUI/state_manager) to revolutions (moteus)
+                        g_axes[axis_index].hold_position = rad_converter::rad_to_rev(position);
                     }
                 }
             }
@@ -400,8 +508,124 @@ int main()
                         if (offset + sizeof(double) > data_len) break;
                         double position;
                         std::memcpy(&position, data_ptr + offset, sizeof(double));
-                        g_axes[i].hold_position = position;
+
+                        // Only update hold_position if not NaN
+                        // NaN means "wait for servo_on_delay to initialize from current_position"
+                        if (!std::isnan(position))
+                        {
+                            // Convert from radians (GUI/state_manager) to revolutions (moteus)
+                            g_axes[i].hold_position = rad_converter::rad_to_rev(position);
+                        }
+                        // If NaN, keep existing hold_position (will be NaN until rx_frames initializes it)
+
                         offset += sizeof(double);
+                    }
+                }
+            }
+            else if (input_id == "set_position")
+            {
+                // Set absolute encoder positions for all axes using OutputExact
+                // Format: [1 byte count][pos0 (8 bytes)][pos1 (8 bytes)]...
+                if (g_config_received && data_len >= 1)
+                {
+                    uint8_t count = static_cast<uint8_t>(data_ptr[0]);
+                    size_t offset_in = 1;
+
+                    uint8_t buffer[1024];
+                    size_t offset_out = 1;  // Reserve first byte for count
+                    uint8_t frame_count = 0;
+
+                    for (uint8_t i = 0; i < count && i < g_axes.size(); ++i)
+                    {
+                        if (offset_in + sizeof(double) > data_len) break;
+                        double position;
+                        std::memcpy(&position, data_ptr + offset_in, sizeof(double));
+                        offset_in += sizeof(double);
+
+                        // Convert from radians (GUI/state_manager) to revolutions (moteus)
+                        double position_rev = rad_converter::rad_to_rev(position);
+                        offset_out += build_set_output_exact_frame(buffer + offset_out, g_axes[i].device_id, position_rev);
+                        frame_count++;
+                        std::cout << "[moteus_communication] Set position for axis " << i
+                                  << " (device_id=" << g_axes[i].device_id << "): " << position
+                                  << " rad (" << position_rev << " rev)" << std::endl;
+                    }
+                    buffer[0] = frame_count;
+
+                    if (frame_count > 0)
+                    {
+                        std::string output_id = "can_frames";
+                        dora_send_output(dora_context,
+                                         const_cast<char*>(output_id.c_str()), output_id.length(),
+                                         reinterpret_cast<char*>(buffer), offset_out);
+                    }
+                }
+            }
+            else if (input_id == "velocity_commands")
+            {
+                // Velocity commands for specific axes (used for wheel control in balancing)
+                // Format: [1 byte count][axis_index(1) + velocity(8)]...[kp_scale(8)][kd_scale(8)]
+                // velocity is in rad/s (converted to rev/s here)
+                if (g_config_received && data_len >= 1)
+                {
+                    uint8_t count = static_cast<uint8_t>(data_ptr[0]);
+                    size_t offset_in = 1;
+
+                    // Parse velocity commands
+                    struct VelCmd {
+                        uint8_t axis_index;
+                        double velocity_rad_s;
+                    };
+                    std::vector<VelCmd> vel_cmds;
+
+                    for (uint8_t i = 0; i < count; ++i)
+                    {
+                        if (offset_in + 9 > data_len) break;
+                        VelCmd cmd;
+                        cmd.axis_index = static_cast<uint8_t>(data_ptr[offset_in]);
+                        offset_in += 1;
+                        std::memcpy(&cmd.velocity_rad_s, data_ptr + offset_in, sizeof(double));
+                        offset_in += sizeof(double);
+                        vel_cmds.push_back(cmd);
+                    }
+
+                    // Parse kp_scale and kd_scale at the end
+                    double kp_scale = 0.0;
+                    double kd_scale = 1.0;
+                    if (offset_in + sizeof(double) <= data_len) {
+                        std::memcpy(&kp_scale, data_ptr + offset_in, sizeof(double));
+                        offset_in += sizeof(double);
+                    }
+                    if (offset_in + sizeof(double) <= data_len) {
+                        std::memcpy(&kd_scale, data_ptr + offset_in, sizeof(double));
+                        offset_in += sizeof(double);
+                    }
+
+                    // Build and send CAN frames
+                    uint8_t buffer[1024];
+                    size_t offset_out = 0;
+                    buffer[offset_out++] = static_cast<uint8_t>(vel_cmds.size());
+
+                    for (const auto& cmd : vel_cmds)
+                    {
+                        if (cmd.axis_index < g_axes.size())
+                        {
+                            const auto& axis = g_axes[cmd.axis_index];
+                            // Convert rad/s to rev/s and apply motor direction
+                            double velocity_rev_s = rad_converter::rad_to_rev(cmd.velocity_rad_s) * axis.motdir;
+                            offset_out += build_velocity_frame(buffer + offset_out, axis.device_id,
+                                                                velocity_rev_s, kp_scale, kd_scale,
+                                                                axis.velocity_limit, axis.accel_limit,
+                                                                axis.torque_limit);
+                        }
+                    }
+
+                    if (vel_cmds.size() > 0)
+                    {
+                        std::string output_id = "can_frames";
+                        dora_send_output(dora_context,
+                                         const_cast<char*>(output_id.c_str()), output_id.length(),
+                                         reinterpret_cast<char*>(buffer), offset_out);
                     }
                 }
             }
@@ -418,21 +642,33 @@ int main()
                     {
                         if (servo_on_mask & (1 << i))
                         {
-                            // Position command with per-axis limits
-                            double pos = g_axes[i].hold_position;
-                            if (!std::isnan(pos))
+                            // If servo_on_delay > 0, send NaN position control (stop mode) and decrement counter
+                            if (g_axes[i].servo_on_delay > 0)
                             {
-                                pos *= g_axes[i].motdir;
+                                std::cout << "[moteus_communication] Axis " << i << " (device_id=" << static_cast<int>(g_axes[i].device_id)
+                                          << ") sending NaN position frame (delay=" << static_cast<int>(g_axes[i].servo_on_delay) << ")" << std::endl;
+                                offset += build_nan_position_frame(buffer + offset, g_axes[i].device_id);
+                                g_axes[i].servo_on_delay--;
                             }
-                            offset += build_position_frame(buffer + offset, g_axes[i].device_id, pos, 0.0,
-                                                           g_axes[i].velocity_limit,
-                                                           g_axes[i].accel_limit,
-                                                           g_axes[i].torque_limit);
+                            else
+                            {
+                                // Position command with per-axis limits
+                                double pos = g_axes[i].hold_position * g_axes[i].motdir;
+                                if (std::isnan(pos))
+                                {
+                                    std::cout << "[moteus_communication] WARNING: Axis " << i << " (device_id=" << static_cast<int>(g_axes[i].device_id)
+                                              << ") sending position_frame with NaN position!" << std::endl;
+                                }
+                                offset += build_position_frame(buffer + offset, g_axes[i].device_id, pos, 0.0,
+                                                               g_axes[i].velocity_limit,
+                                                               g_axes[i].accel_limit,
+                                                               g_axes[i].torque_limit);
+                            }
                         }
                         else
                         {
-                            // Stop command
-                            offset += build_stop_frame(buffer + offset, g_axes[i].device_id);
+                            // Servo OFF: Send servo_off frame (power-off, no torque)
+                            offset += build_servo_off_frame(buffer + offset, g_axes[i].device_id);
                         }
                     }
 
@@ -461,6 +697,7 @@ int main()
                         double q_current;
                         double torque;
                         double motor_temp;
+                        int8_t fault;
                     };
                     std::vector<AxisStatus> statuses(g_axes.size());
                     for (auto& s : statuses) {
@@ -471,6 +708,7 @@ int main()
                         s.q_current = 0.0;
                         s.torque = 0.0;
                         s.motor_temp = 0.0;
+                        s.fault = 0;
                     }
 
                     for (uint8_t i = 0; i < frame_count && offset < data_len; ++i)
@@ -501,14 +739,43 @@ int main()
                                 // Save raw position for set_zero
                                 g_axes[j].current_position = result.position;
 
+                                // Initialize hold_position if NaN and delay has expired
+                                if (std::isnan(g_axes[j].hold_position) && !std::isnan(result.position) && g_axes[j].servo_on_delay == 0)
+                                {
+                                    g_axes[j].hold_position = result.position;
+                                    std::cout << "[moteus_communication] Axis " << j << " (device_id=" << static_cast<int>(g_axes[j].device_id)
+                                              << ") hold_position initialized to " << result.position << " rev" << std::endl;
+                                }
+
+                                // Fault detection: Log only if fault changed
+                                if (result.fault != g_axes[j].previous_fault)
+                                {
+                                    if (result.fault != 0)
+                                    {
+                                        std::cout << "[moteus_communication] FAULT DETECTED - Axis " << j
+                                                  << " (" << g_axes[j].name << ", device_id=" << g_axes[j].device_id
+                                                  << "): fault code = " << static_cast<int>(result.fault) << std::endl;
+                                    }
+                                    else
+                                    {
+                                        std::cout << "[moteus_communication] FAULT CLEARED - Axis " << j
+                                                  << " (" << g_axes[j].name << ", device_id=" << g_axes[j].device_id
+                                                  << ")" << std::endl;
+                                    }
+                                    g_axes[j].previous_fault = result.fault;
+                                }
+
                                 int motdir = g_axes[j].motdir;
                                 statuses[j].mode = static_cast<uint8_t>(result.mode);
-                                statuses[j].position = std::isnan(result.position) ? 0.0 : result.position * motdir;
+                                // Convert from revolutions (moteus) to radians (state_manager) and apply motor direction
+                                double position_rev = result.position * motdir;
+                                statuses[j].position = std::isnan(result.position) ? 0.0 : rad_converter::rev_to_rad(position_rev);
                                 statuses[j].velocity = std::isnan(result.velocity) ? 0.0 : result.velocity * motdir;
                                 statuses[j].d_current = std::isnan(result.d_current) ? 0.0 : result.d_current;
                                 statuses[j].q_current = std::isnan(result.q_current) ? 0.0 : result.q_current * motdir;
                                 statuses[j].torque = std::isnan(result.torque) ? 0.0 : result.torque * motdir;
                                 statuses[j].motor_temp = std::isnan(result.motor_temperature) ? 0.0 : result.motor_temperature;
+                                statuses[j].fault = result.fault;  // Store fault in status
                                 break;
                             }
                         }
@@ -517,9 +784,9 @@ int main()
                     }
 
                     // Output motor_status
-                    // Format: [1 byte count][axis1: mode(1) + pos(8) + vel(8) + d_cur(8) + q_cur(8) + torq(8) + temp(8)]...
-                    // Per axis: 1 + 6*8 = 49 bytes
-                    uint8_t status_buffer[1 + 64 * 49];
+                    // Format: [1 byte count][axis1: mode(1) + pos(8) + vel(8) + d_cur(8) + q_cur(8) + torq(8) + temp(8) + fault(1)]...
+                    // Per axis: 1 + 6*8 + 1 = 50 bytes
+                    uint8_t status_buffer[1 + 64 * 50];
                     size_t status_offset = 0;
                     status_buffer[status_offset++] = static_cast<uint8_t>(statuses.size());
                     for (const auto& s : statuses)
@@ -537,6 +804,7 @@ int main()
                         status_offset += sizeof(double);
                         std::memcpy(status_buffer + status_offset, &s.motor_temp, sizeof(double));
                         status_offset += sizeof(double);
+                        status_buffer[status_offset++] = static_cast<uint8_t>(s.fault);
                     }
 
                     std::string output_id = "motor_status";
