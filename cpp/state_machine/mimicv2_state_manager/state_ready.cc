@@ -4,17 +4,12 @@
 #include "timing_manager.hpp"
 #include <iostream>
 #include <vector>
-#include <utility>
 
 extern TimingManager g_timing;
 
 // ホイール軸インデックス
 static constexpr int WHEEL_R_INDEX = 2;
 static constexpr int WHEEL_L_INDEX = 5;
-
-// 速度制御パラメータ
-static constexpr double KP_SCALE = 0.0;  // 純粋な速度制御
-static constexpr double KD_SCALE = 1.0;
 
 void start_interpolation()
 {
@@ -63,20 +58,23 @@ void tick_interpolation(void* dora_context)
     double t = elapsed / g_interpolation_time;
     if (t > 1.0) t = 1.0;
 
-    // 股・膝は位置制御で補間
-    std::vector<double> positions(g_axes.size());
+    // 全軸分のコマンドを作成
+    std::vector<AxisCommand> commands(g_axes.size());
     for (size_t i = 0; i < g_axes.size(); ++i)
     {
-        positions[i] = interpolate(g_interp_start_positions[i], g_interp_target_positions[i], t);
+        if (i == WHEEL_R_INDEX || i == WHEEL_L_INDEX)
+        {
+            // ホイールは速度制御（指令値0）
+            commands[i] = AxisCommand::velocity_control(0.0);
+        }
+        else
+        {
+            // 股・膝は位置制御で補間
+            double pos = interpolate(g_interp_start_positions[i], g_interp_target_positions[i], t);
+            commands[i] = AxisCommand::position_control(pos);
+        }
     }
-    send_position_commands(dora_context, positions);
-
-    // ホイールは速度制御（指令値0）
-    std::vector<std::pair<int, double>> wheel_cmds = {
-        {WHEEL_R_INDEX, 0.0},
-        {WHEEL_L_INDEX, 0.0}
-    };
-    send_velocity_commands(dora_context, wheel_cmds, KP_SCALE, KD_SCALE);
+    send_position_commands(dora_context, commands);
 
     uint8_t progress = static_cast<uint8_t>(t * 100);
     send_state_status(dora_context, progress);
@@ -91,18 +89,20 @@ void tick_interpolation(void* dora_context)
 
 void tick_ready_hold(void* dora_context)
 {
-    // 股・膝は位置制御で初期姿勢保持
-    std::vector<double> positions(g_axes.size());
+    // 全軸分のコマンドを作成
+    std::vector<AxisCommand> commands(g_axes.size());
     for (size_t i = 0; i < g_axes.size(); ++i)
     {
-        positions[i] = g_axes[i].initial_position;
+        if (i == WHEEL_R_INDEX || i == WHEEL_L_INDEX)
+        {
+            // ホイールは速度制御（指令値0）
+            commands[i] = AxisCommand::velocity_control(0.0);
+        }
+        else
+        {
+            // 股・膝は位置制御で初期姿勢保持
+            commands[i] = AxisCommand::position_control(g_axes[i].initial_position);
+        }
     }
-    send_position_commands(dora_context, positions);
-
-    // ホイールは速度制御（指令値0）
-    std::vector<std::pair<int, double>> wheel_cmds = {
-        {WHEEL_R_INDEX, 0.0},
-        {WHEEL_L_INDEX, 0.0}
-    };
-    send_velocity_commands(dora_context, wheel_cmds, KP_SCALE, KD_SCALE);
+    send_position_commands(dora_context, commands);
 }

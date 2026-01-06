@@ -31,6 +31,7 @@ struct AxisConfig
     double initial_position;
     double current_position;
     double current_torque;
+    uint8_t fault;  // moteus fault code (0 = no fault)
 };
 
 // IMUデータ構造体

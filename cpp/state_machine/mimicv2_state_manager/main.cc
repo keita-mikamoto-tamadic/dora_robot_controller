@@ -7,6 +7,7 @@ extern "C"
 #include <cstring>
 #include <cstdlib>
 #include <sched.h>
+#include <cmath>
 
 #include "types.hpp"
 #include "helpers.hpp"
@@ -94,6 +95,7 @@ static void handle_motor_status(void* dora_context, const char* data, size_t len
     uint8_t count = static_cast<uint8_t>(data[0]);
     size_t offset = 1;
     bool fault_detected = false;
+    uint8_t valid_count = 0;  // Count axes with valid (non-zero) position
 
     for (uint8_t i = 0; i < count && i < g_axes.size(); ++i)
     {
@@ -118,14 +120,24 @@ static void handle_motor_status(void* dora_context, const char* data, size_t len
         int8_t fault = static_cast<int8_t>(data[offset]);
         offset += 1;  // fault
 
+        // Count valid axes (position != 0 means we got a response)
+        if (position != 0.0) valid_count++;
+
         g_axes[i].current_position = position;
         g_axes[i].current_torque = torque;
+        g_axes[i].fault = static_cast<uint8_t>(fault);
 
         // Detect fault and trigger STOP state
         if (fault != 0)
         {
             fault_detected = true;
         }
+    }
+
+    // Log if not all axes received (only in STOP/READY states)
+    if ((g_current_state == State::STOP || g_current_state == State::READY) && valid_count < g_axes.size())
+    {
+        std::cout << "[RX_MISS] valid=" << static_cast<int>(valid_count) << "/" << g_axes.size() << std::endl;
     }
 
     // If any fault detected, transition to STOP state for safety

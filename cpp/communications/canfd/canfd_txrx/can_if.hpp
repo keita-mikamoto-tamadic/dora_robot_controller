@@ -55,12 +55,12 @@ public:
      * Waits for TX loopbacks and RX responses, matches by expected response IDs
      * @param expected_ids Expected response arbitration IDs (device_id << 8)
      * @param rx_frames Output: received frames (indexed same as expected_ids)
-     * @param total_cycle_time_us Output: total round-trip time
+     * @param wall_clock_time_us Output: wall clock time from start to end of receive (includes timeout waits)
      * @return Number of successfully received frames
      */
     int receiveMultiple(const std::vector<uint32_t>& expected_ids,
                         std::vector<RxFrame>& rx_frames,
-                        int64_t& total_cycle_time_us);
+                        int64_t& wall_clock_time_us);
 
 private:
     std::string interface_name_;

@@ -3,8 +3,8 @@
   "axis_count": 3,
   "interpolation_time": 2.0,
   "axes": [
-    {"index": 0, "name": "motor1", "device_id": 1, "motdir": 1, "initial_position": 0.2, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
-    {"index": 1, "name": "motor2", "device_id": 2, "motdir": 1, "initial_position": -0.2, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
-    {"index": 2, "name": "motor3", "device_id": 3, "motdir": 1, "initial_position": 0.0, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0}
+    {"index": 0, "name": "hip_pitch_l", "device_id": 4, "motdir": 1, "initial_position": 0.8, "reset_position": -0.130899, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
+    {"index": 1, "name": "knee_l", "device_id": 5, "motdir": 1, "initial_position": -1.4, "reset_position": -2.373644, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0},
+    {"index": 2, "name": "wheel_l", "device_id": 6, "motdir": 1, "initial_position": 0.0, "reset_position": 0.0, "velocity_limit": 100.0, "accel_limit": 20.0, "torque_limit": 10.0}
   ]
 }

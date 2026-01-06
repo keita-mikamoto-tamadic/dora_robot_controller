@@ -17,6 +17,7 @@ nodes:
       state_status: mimicv2_state_manager/state_status
       motor_display: mimicv2_state_manager/motor_display
       imu_data: imu_node/imu_data
+      cycle_time_us: canfd_txrx/cycle_time_us
     outputs:
       - robot_config
       - state_command
@@ -25,7 +26,7 @@ nodes:
   - id: mimicv2_state_manager
     path: cpp/state_machine/mimicv2_state_manager/mimicv2_state_manager_node
     inputs:
-      tick: dora/timer/millis/5
+      tick: dora/timer/millis/4
       robot_config: robot_control_gui/robot_config
       motor_status: moteus_communication/motor_status
       state_command: robot_control_gui/state_command
@@ -35,7 +36,6 @@ nodes:
       - servo_on
       - servo_off
       - position_commands
-      - velocity_commands
       - state_status
       - motor_display
       - query
@@ -53,7 +53,6 @@ nodes:
       servo_on: mimicv2_state_manager/servo_on
       servo_off: mimicv2_state_manager/servo_off
       position_commands: mimicv2_state_manager/position_commands
-      velocity_commands: mimicv2_state_manager/velocity_commands
       set_position: mimicv2_state_manager/set_position
     outputs:
       - axis_config

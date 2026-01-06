@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -136,11 +137,15 @@ bool CanInterface::send(uint32_t tx_arb_id, const uint8_t* data, uint8_t len)
 
 int CanInterface::receiveMultiple(const std::vector<uint32_t>& expected_ids,
                                    std::vector<RxFrame>& rx_frames,
-                                   int64_t& total_cycle_time_us)
+                                   int64_t& wall_clock_time_us)
 {
+    // Record start time for wall clock measurement
+    auto start_time = std::chrono::steady_clock::now();
+
     if (!initialized_)
     {
         std::cerr << "[CanInterface] Not initialized" << std::endl;
+        wall_clock_time_us = 0;
         return 0;
     }
 
@@ -167,11 +172,14 @@ int CanInterface::receiveMultiple(const std::vector<uint32_t>& expected_ids,
     }
 
     int received_count = 0;
-    total_cycle_time_us = 0;
 
-    // Timeout for all frames (axis count * per-frame timeout)
-    int total_timeout_ms = static_cast<int>((rx_timeout_us_ * num_axes * 2 + 999) / 1000);
+    // Total timeout: rx_timeout_us per axis (not multiplied, sequential is handled at call site)
+    // For 3 axes with 8ms timeout each, we want ~8ms total (frames arrive nearly simultaneously)
+    int total_timeout_ms = static_cast<int>((rx_timeout_us_ + 999) / 1000);
     if (total_timeout_ms < 1) total_timeout_ms = 1;
+
+    // Deadline for all receives
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(total_timeout_ms);
 
     // Prepare for recvmsg with timestamp
     struct canfd_frame recv_frame;
@@ -191,13 +199,22 @@ int CanInterface::receiveMultiple(const std::vector<uint32_t>& expected_ids,
     pfd.fd = sock_;
     pfd.events = POLLIN;
 
-    // Keep receiving until we get all responses or timeout
+    // Keep receiving until we get all responses or deadline
     while (static_cast<size_t>(received_count) < num_axes)
     {
-        int ret = poll(&pfd, 1, total_timeout_ms);
+        // Calculate remaining time until deadline
+        auto now = std::chrono::steady_clock::now();
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (remaining <= 0)
+        {
+            // Deadline reached
+            break;
+        }
+
+        int ret = poll(&pfd, 1, static_cast<int>(remaining));
         if (ret <= 0)
         {
-            // Timeout
+            // Timeout or error
             break;
         }
 
@@ -249,19 +266,17 @@ int CanInterface::receiveMultiple(const std::vector<uint32_t>& expected_ids,
                         rx_frames[i].arb_id = rx_arb_id;
                         rx_frames[i].len = recv_frame.len;
                         std::memcpy(rx_frames[i].data, recv_frame.data, recv_frame.len);
-
-                        // Calculate cycle time if we have TX timestamp
-                        if (got_tx_loopback[i] && tx_timestamps[i] > 0)
-                        {
-                            int64_t cycle_us = (frame_timestamp_ns - tx_timestamps[i]) / 1000;
-                            total_cycle_time_us += cycle_us;
-                        }
                         break;
                     }
                 }
             }
         }
     }
+
+    // Calculate wall clock time (includes all timeout waits)
+    auto end_time = std::chrono::steady_clock::now();
+    wall_clock_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        end_time - start_time).count();
 
     return received_count;
 }

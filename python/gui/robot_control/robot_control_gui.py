@@ -41,13 +41,17 @@ class RobotControlGUI:
         self.current_state = 0
         self.progress = 0
 
-        # Per-axis data (position, torque)
+        # Per-axis data (position, torque, fault)
         self.axis_data = []
         for _ in range(self.axis_count):
             self.axis_data.append({
                 'position': 0.0,
-                'torque': 0.0
+                'torque': 0.0,
+                'fault': 0
             })
+
+        # Cycle time tracking
+        self.cycle_times = []
 
         self.setup_ui()
 
@@ -100,6 +104,15 @@ class RobotControlGUI:
         self.imu_yaw_label = ttk.Label(imu_inner, text="Y:  0.00", font=("Courier", 10), width=10)
         self.imu_yaw_label.pack(side=tk.LEFT, padx=5)
 
+        # Cycle time display (separator + labels)
+        ttk.Separator(imu_inner, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
+        ttk.Label(imu_inner, text="Cycle:", font=("Helvetica", 10)).pack(side=tk.LEFT)
+        self.cycle_current_label = ttk.Label(imu_inner, text="---- us", font=("Courier", 10), width=10)
+        self.cycle_current_label.pack(side=tk.LEFT, padx=2)
+        ttk.Label(imu_inner, text="avg:", font=("Helvetica", 10)).pack(side=tk.LEFT)
+        self.cycle_avg_label = ttk.Label(imu_inner, text="---- us", font=("Courier", 10), width=10)
+        self.cycle_avg_label.pack(side=tk.LEFT, padx=2)
+
         # Control buttons frame
         btn_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
         btn_frame.pack(fill=tk.X, pady=5)
@@ -133,11 +146,13 @@ class RobotControlGUI:
 
         ttk.Label(header_frame, text="ID", width=6, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Name", width=15, anchor=tk.CENTER,
+        ttk.Label(header_frame, text="Name", width=12, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Position (rad)", width=15, anchor=tk.CENTER,
+        ttk.Label(header_frame, text="Position", width=12, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Torque (Nm)", width=15, anchor=tk.CENTER,
+        ttk.Label(header_frame, text="Torque", width=10, anchor=tk.CENTER,
+                  font=("Courier", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Label(header_frame, text="Status", width=10, anchor=tk.CENTER,
                   font=("Courier", 10, "bold")).pack(side=tk.LEFT)
 
         ttk.Separator(table_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
@@ -155,20 +170,26 @@ class RobotControlGUI:
                       font=("Courier", 10)).pack(side=tk.LEFT)
 
             # Name
-            ttk.Label(row_frame, text=f"{axis['name']}", width=15, anchor=tk.W,
+            ttk.Label(row_frame, text=f"{axis['name']}", width=12, anchor=tk.W,
                       font=("Courier", 10)).pack(side=tk.LEFT)
 
             # Position
-            pos_lbl = ttk.Label(row_frame, text="0.000", width=15, anchor=tk.E,
+            pos_lbl = ttk.Label(row_frame, text="0.000", width=12, anchor=tk.E,
                                font=("Courier", 10))
             pos_lbl.pack(side=tk.LEFT)
             row_data['position'] = pos_lbl
 
             # Torque
-            torq_lbl = ttk.Label(row_frame, text="0.000", width=15, anchor=tk.E,
+            torq_lbl = ttk.Label(row_frame, text="0.000", width=10, anchor=tk.E,
                                 font=("Courier", 10))
             torq_lbl.pack(side=tk.LEFT)
             row_data['torque'] = torq_lbl
+
+            # Status (fault)
+            status_lbl = ttk.Label(row_frame, text="OK", width=10, anchor=tk.CENTER,
+                                   font=("Courier", 10), foreground="green")
+            status_lbl.pack(side=tk.LEFT)
+            row_data['status'] = status_lbl
 
             self.row_labels.append(row_data)
 
@@ -230,18 +251,32 @@ class RobotControlGUI:
 
         self.progress_var.set(progress)
 
-    def update_motor_display(self, positions, torques):
-        """Update motor position and torque display"""
+    def update_motor_display(self, positions, torques, faults):
+        """Update motor position, torque, and fault display"""
         for i in range(min(len(positions), len(self.row_labels))):
-            self.row_labels[i]['position'].config(text=f"{positions[i]:.4f}")
+            self.row_labels[i]['position'].config(text=f"{positions[i]:.3f}")
         for i in range(min(len(torques), len(self.row_labels))):
-            self.row_labels[i]['torque'].config(text=f"{torques[i]:.4f}")
+            self.row_labels[i]['torque'].config(text=f"{torques[i]:.2f}")
+        for i in range(min(len(faults), len(self.row_labels))):
+            if faults[i] == 0:
+                self.row_labels[i]['status'].config(text="OK", foreground="green")
+            else:
+                self.row_labels[i]['status'].config(text=f"F{faults[i]}", foreground="red")
 
     def update_imu_display(self, roll, pitch, yaw):
         """Update IMU display (angles in radians)"""
         self.imu_roll_label.config(text=f"R:{roll:7.4f}")
         self.imu_pitch_label.config(text=f"P:{pitch:7.4f}")
         self.imu_yaw_label.config(text=f"Y:{yaw:7.4f}")
+
+    def update_cycle_time(self, cycle_us):
+        """Update cycle time display"""
+        self.cycle_times.append(cycle_us)
+        if len(self.cycle_times) > 100:
+            self.cycle_times.pop(0)
+        avg = sum(self.cycle_times) / len(self.cycle_times)
+        self.cycle_current_label.config(text=f"{cycle_us} us")
+        self.cycle_avg_label.config(text=f"{avg:.0f} us")
 
 
 def load_robot_config():
@@ -314,6 +349,7 @@ def main():
                             offset = 1
                             positions = []
                             torques = []
+                            faults = []
 
                             # Positions
                             for i in range(count):
@@ -329,7 +365,15 @@ def main():
                                     torques.append(torq)
                                     offset += 8
 
-                            status_queue.put(("motor_display", (positions, torques)))
+                            # Faults
+                            for i in range(count):
+                                if offset < len(raw):
+                                    faults.append(raw[offset])
+                                    offset += 1
+                                else:
+                                    faults.append(0)
+
+                            status_queue.put(("motor_display", (positions, torques, faults)))
 
                     elif event["id"] == "imu_data":
                         # IMU data: [valid(1)][q0-q3(16)][gx-gz(12)][ax-az(12)][roll,pitch,yaw(12)][timestamp(8)]
@@ -341,6 +385,12 @@ def main():
                             pitch = struct.unpack('f', raw[offset+4:offset+8])[0]
                             yaw = struct.unpack('f', raw[offset+8:offset+12])[0]
                             status_queue.put(("imu_data", (roll, pitch, yaw)))
+
+                    elif event["id"] == "cycle_time_us":
+                        raw = bytes(event["value"].to_pylist())
+                        if len(raw) >= 4:
+                            cycle_us = struct.unpack('<I', raw[:4])[0]  # uint32_t
+                            status_queue.put(("cycle_time", cycle_us))
 
             except Exception as e:
                 print(f"[gui] Dora error: {e}")
@@ -359,11 +409,13 @@ def main():
                     state, progress = data
                     gui.update_state_status(state, progress)
                 elif msg_type == "motor_display":
-                    positions, torques = data
-                    gui.update_motor_display(positions, torques)
+                    positions, torques, faults = data
+                    gui.update_motor_display(positions, torques, faults)
                 elif msg_type == "imu_data":
                     roll, pitch, yaw = data
                     gui.update_imu_display(roll, pitch, yaw)
+                elif msg_type == "cycle_time":
+                    gui.update_cycle_time(data)
         except queue.Empty:
             pass
         root.after(10, update_gui)

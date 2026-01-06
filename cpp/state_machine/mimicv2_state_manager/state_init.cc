@@ -28,6 +28,7 @@ void handle_robot_config(void* dora_context, const char* data, size_t len)
             axis.initial_position = axis_json.value("initial_position", 0.0);
             axis.current_position = 0.0;
             axis.current_torque = 0.0;
+            axis.fault = 0;
             g_axes.push_back(axis);
         }
 

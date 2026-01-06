@@ -31,14 +31,33 @@ void send_servo_off(void* dora_context, uint8_t mask)
 
 void send_position_commands(void* dora_context, const std::vector<double>& positions)
 {
-    // Format: [1 byte count][pos0 (8 bytes)][pos1 (8 bytes)]...
-    std::vector<uint8_t> buffer(1 + positions.size() * sizeof(double));
-    size_t offset = 0;
-
-    buffer[offset++] = static_cast<uint8_t>(positions.size());
+    // 旧フォーマット互換: 位置のみの場合はAxisCommandに変換
+    std::vector<AxisCommand> commands;
+    commands.reserve(positions.size());
     for (const auto& pos : positions)
     {
-        std::memcpy(buffer.data() + offset, &pos, sizeof(double));
+        commands.push_back(AxisCommand::position_control(pos));
+    }
+    send_position_commands(dora_context, commands);
+}
+
+void send_position_commands(void* dora_context, const std::vector<AxisCommand>& commands)
+{
+    // 新フォーマット: [1 byte count][軸0: pos(8)+vel(8)+kp(8)+kd(8)][軸1...]
+    size_t per_axis = 4 * sizeof(double);  // position, velocity, kp_scale, kd_scale
+    std::vector<uint8_t> buffer(1 + commands.size() * per_axis);
+    size_t offset = 0;
+
+    buffer[offset++] = static_cast<uint8_t>(commands.size());
+    for (const auto& cmd : commands)
+    {
+        std::memcpy(buffer.data() + offset, &cmd.position, sizeof(double));
+        offset += sizeof(double);
+        std::memcpy(buffer.data() + offset, &cmd.velocity, sizeof(double));
+        offset += sizeof(double);
+        std::memcpy(buffer.data() + offset, &cmd.kp_scale, sizeof(double));
+        offset += sizeof(double);
+        std::memcpy(buffer.data() + offset, &cmd.kd_scale, sizeof(double));
         offset += sizeof(double);
     }
 
@@ -83,7 +102,8 @@ void send_state_status(void* dora_context, uint8_t progress)
 void send_motor_display(void* dora_context)
 {
     size_t n = g_axes.size();
-    std::vector<uint8_t> buffer(1 + n * 16);
+    // Format: [1 byte count][positions (n*8)][torques (n*8)][faults (n*1)]
+    std::vector<uint8_t> buffer(1 + n * 16 + n);
     size_t offset = 0;
 
     buffer[offset++] = static_cast<uint8_t>(n);
@@ -98,6 +118,11 @@ void send_motor_display(void* dora_context)
     {
         std::memcpy(buffer.data() + offset, &axis.current_torque, sizeof(double));
         offset += sizeof(double);
+    }
+
+    for (const auto& axis : g_axes)
+    {
+        buffer[offset++] = axis.fault;
     }
 
     std::string output_id = "motor_display";
@@ -121,33 +146,4 @@ void forward_robot_config(void* dora_context, const char* data, size_t len)
     dora_send_output(dora_context,
                      const_cast<char*>(output_id.c_str()), output_id.length(),
                      const_cast<char*>(data), len);
-}
-
-void send_velocity_commands(void* dora_context,
-                            const std::vector<std::pair<int, double>>& velocities,
-                            double kp_scale, double kd_scale)
-{
-    // Format: [1 byte count][axis_index(1) + velocity(8)]...[kp_scale(8)][kd_scale(8)]
-    size_t count = velocities.size();
-    std::vector<uint8_t> buffer(1 + count * 9 + 16);  // count + entries + kp_scale + kd_scale
-    size_t offset = 0;
-
-    buffer[offset++] = static_cast<uint8_t>(count);
-
-    for (const auto& vel : velocities)
-    {
-        buffer[offset++] = static_cast<uint8_t>(vel.first);  // axis_index
-        std::memcpy(buffer.data() + offset, &vel.second, sizeof(double));  // velocity (rad/s)
-        offset += sizeof(double);
-    }
-
-    std::memcpy(buffer.data() + offset, &kp_scale, sizeof(double));
-    offset += sizeof(double);
-    std::memcpy(buffer.data() + offset, &kd_scale, sizeof(double));
-    offset += sizeof(double);
-
-    std::string output_id = "velocity_commands";
-    dora_send_output(dora_context,
-                     const_cast<char*>(output_id.c_str()), output_id.length(),
-                     reinterpret_cast<char*>(buffer.data()), offset);
 }

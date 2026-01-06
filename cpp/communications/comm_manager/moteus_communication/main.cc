@@ -26,7 +26,10 @@ struct AxisConfig
     std::string name;
     int device_id;
     int motdir;  // Motor direction: 1 or -1
-    double hold_position;  // Current hold position
+    double hold_position;  // Current hold position (rev)
+    double hold_velocity;  // Current target velocity (rev/s)
+    double kp_scale;       // Position gain scale
+    double kd_scale;       // Velocity gain scale
     double current_position;  // Latest position from moteus (raw, no motdir)
     double velocity_limit;  // rev/s
     double accel_limit;     // rev/s^2
@@ -40,7 +43,10 @@ static std::vector<AxisConfig> g_axes;
 static bool g_config_received = false;
 
 // Build position command frame for moteus
+// kp_scale=1.0, kd_scale=1.0 for position control
+// kp_scale=0.0, kd_scale=1.0 for velocity control (position=NaN)
 size_t build_position_frame(uint8_t* buffer, int motor_id, double position, double velocity,
+                            double kp_scale, double kd_scale,
                             double velocity_limit, double accel_limit, double torque_limit)
 {
     CanData frame;
@@ -52,57 +58,7 @@ size_t build_position_frame(uint8_t* buffer, int motor_id, double position, doub
     cmd.velocity = velocity;
     cmd.maximum_torque = torque_limit;
     cmd.feedforward_torque = 0.0;
-    cmd.kp_scale = 1.0;
-    cmd.kd_scale = 1.0;
-    cmd.stop_position = std::numeric_limits<double>::quiet_NaN();
-    cmd.watchdog_timeout = std::numeric_limits<double>::quiet_NaN();
-    cmd.velocity_limit = velocity_limit;
-    cmd.accel_limit = accel_limit;
-
-    PositionMode::Format fmt;
-    fmt.maximum_torque = Resolution::kFloat;
-    fmt.velocity_limit = Resolution::kFloat;
-    fmt.accel_limit = Resolution::kFloat;
-    PositionMode::Make(&writer, cmd, fmt);
-
-    // Also request query with extended data
-    Query::Format query_fmt;
-    query_fmt.q_current = Resolution::kFloat;
-    query_fmt.fault = Resolution::kInt8;  // Request fault code
-    // d_current and motor_temperature removed for faster communication
-    Query::Make(&writer, query_fmt);
-
-    // Pack: [4 bytes arb_id][1 byte len][data...]
-    size_t offset = 0;
-    uint32_t arb_id = 0x8000 | motor_id;
-    std::memcpy(buffer + offset, &arb_id, 4);
-    offset += 4;
-
-    buffer[offset] = frame.size;
-    offset += 1;
-
-    std::memcpy(buffer + offset, frame.data, frame.size);
-    offset += frame.size;
-
-    return offset;
-}
-
-// Build velocity command frame for moteus (position=NaN, velocity=specified)
-// For pure velocity control: position is NaN, velocity is the target rate
-size_t build_velocity_frame(uint8_t* buffer, int motor_id, double velocity,
-                            double kp_scale, double kd_scale,
-                            double velocity_limit, double accel_limit, double torque_limit)
-{
-    CanData frame;
-    WriteCanData writer(&frame);
-
-    // Position mode command with NaN position for velocity control
-    PositionMode::Command cmd;
-    cmd.position = std::numeric_limits<double>::quiet_NaN();  // Use current position
-    cmd.velocity = velocity;  // Target velocity in rev/s
-    cmd.maximum_torque = torque_limit;
-    cmd.feedforward_torque = 0.0;
-    cmd.kp_scale = kp_scale;  // 0.0 for pure velocity control
+    cmd.kp_scale = kp_scale;
     cmd.kd_scale = kd_scale;
     cmd.stop_position = std::numeric_limits<double>::quiet_NaN();
     cmd.watchdog_timeout = std::numeric_limits<double>::quiet_NaN();
@@ -120,7 +76,8 @@ size_t build_velocity_frame(uint8_t* buffer, int motor_id, double velocity,
     // Also request query with extended data
     Query::Format query_fmt;
     query_fmt.q_current = Resolution::kFloat;
-    query_fmt.fault = Resolution::kInt8;
+    query_fmt.fault = Resolution::kInt8;  // Request fault code
+    // d_current and motor_temperature removed for faster communication
     Query::Make(&writer, query_fmt);
 
     // Pack: [4 bytes arb_id][1 byte len][data...]
@@ -373,6 +330,9 @@ int main()
                             axis.device_id = axis_json["device_id"].get<int>();
                             axis.motdir = axis_json["motdir"].get<int>();
                             axis.hold_position = std::numeric_limits<double>::quiet_NaN();
+                            axis.hold_velocity = 0.0;
+                            axis.kp_scale = 1.0;
+                            axis.kd_scale = 1.0;
                             axis.current_position = std::numeric_limits<double>::quiet_NaN();
                             axis.previous_fault = 0;  // Initialize fault tracking
                             axis.servo_on_delay = 0;  // Initialize servo_on delay counter
@@ -498,27 +458,44 @@ int main()
             else if (input_id == "position_commands")
             {
                 // Batch position commands for all axes
-                // Format: [1 byte count][pos0 (8 bytes)][pos1 (8 bytes)]...
+                // New format: [1 byte count][軸0: pos(8)+vel(8)+kp(8)+kd(8)][軸1...]
+                // position: target position in rad (NaN for velocity control)
+                // velocity: target velocity in rad/s
+                // kp_scale: position gain scale (0 for velocity control)
+                // kd_scale: velocity gain scale
                 if (g_config_received && data_len >= 1)
                 {
                     uint8_t count = static_cast<uint8_t>(data_ptr[0]);
                     size_t offset = 1;
+                    size_t per_axis = 4 * sizeof(double);  // position, velocity, kp_scale, kd_scale
+
                     for (uint8_t i = 0; i < count && i < g_axes.size(); ++i)
                     {
-                        if (offset + sizeof(double) > data_len) break;
-                        double position;
-                        std::memcpy(&position, data_ptr + offset, sizeof(double));
+                        if (offset + per_axis > data_len) break;
 
-                        // Only update hold_position if not NaN
-                        // NaN means "wait for servo_on_delay to initialize from current_position"
+                        double position, velocity, kp_scale, kd_scale;
+                        std::memcpy(&position, data_ptr + offset, sizeof(double));
+                        offset += sizeof(double);
+                        std::memcpy(&velocity, data_ptr + offset, sizeof(double));
+                        offset += sizeof(double);
+                        std::memcpy(&kp_scale, data_ptr + offset, sizeof(double));
+                        offset += sizeof(double);
+                        std::memcpy(&kd_scale, data_ptr + offset, sizeof(double));
+                        offset += sizeof(double);
+
+                        // Convert from radians to revolutions
+                        // Position: NaN means velocity control mode
                         if (!std::isnan(position))
                         {
-                            // Convert from radians (GUI/state_manager) to revolutions (moteus)
                             g_axes[i].hold_position = rad_converter::rad_to_rev(position);
                         }
-                        // If NaN, keep existing hold_position (will be NaN until rx_frames initializes it)
-
-                        offset += sizeof(double);
+                        else
+                        {
+                            g_axes[i].hold_position = std::numeric_limits<double>::quiet_NaN();
+                        }
+                        g_axes[i].hold_velocity = rad_converter::rad_to_rev(velocity);
+                        g_axes[i].kp_scale = kp_scale;
+                        g_axes[i].kd_scale = kd_scale;
                     }
                 }
             }
@@ -561,74 +538,6 @@ int main()
                     }
                 }
             }
-            else if (input_id == "velocity_commands")
-            {
-                // Velocity commands for specific axes (used for wheel control in balancing)
-                // Format: [1 byte count][axis_index(1) + velocity(8)]...[kp_scale(8)][kd_scale(8)]
-                // velocity is in rad/s (converted to rev/s here)
-                if (g_config_received && data_len >= 1)
-                {
-                    uint8_t count = static_cast<uint8_t>(data_ptr[0]);
-                    size_t offset_in = 1;
-
-                    // Parse velocity commands
-                    struct VelCmd {
-                        uint8_t axis_index;
-                        double velocity_rad_s;
-                    };
-                    std::vector<VelCmd> vel_cmds;
-
-                    for (uint8_t i = 0; i < count; ++i)
-                    {
-                        if (offset_in + 9 > data_len) break;
-                        VelCmd cmd;
-                        cmd.axis_index = static_cast<uint8_t>(data_ptr[offset_in]);
-                        offset_in += 1;
-                        std::memcpy(&cmd.velocity_rad_s, data_ptr + offset_in, sizeof(double));
-                        offset_in += sizeof(double);
-                        vel_cmds.push_back(cmd);
-                    }
-
-                    // Parse kp_scale and kd_scale at the end
-                    double kp_scale = 0.0;
-                    double kd_scale = 1.0;
-                    if (offset_in + sizeof(double) <= data_len) {
-                        std::memcpy(&kp_scale, data_ptr + offset_in, sizeof(double));
-                        offset_in += sizeof(double);
-                    }
-                    if (offset_in + sizeof(double) <= data_len) {
-                        std::memcpy(&kd_scale, data_ptr + offset_in, sizeof(double));
-                        offset_in += sizeof(double);
-                    }
-
-                    // Build and send CAN frames
-                    uint8_t buffer[1024];
-                    size_t offset_out = 0;
-                    buffer[offset_out++] = static_cast<uint8_t>(vel_cmds.size());
-
-                    for (const auto& cmd : vel_cmds)
-                    {
-                        if (cmd.axis_index < g_axes.size())
-                        {
-                            const auto& axis = g_axes[cmd.axis_index];
-                            // Convert rad/s to rev/s and apply motor direction
-                            double velocity_rev_s = rad_converter::rad_to_rev(cmd.velocity_rad_s) * axis.motdir;
-                            offset_out += build_velocity_frame(buffer + offset_out, axis.device_id,
-                                                                velocity_rev_s, kp_scale, kd_scale,
-                                                                axis.velocity_limit, axis.accel_limit,
-                                                                axis.torque_limit);
-                        }
-                    }
-
-                    if (vel_cmds.size() > 0)
-                    {
-                        std::string output_id = "can_frames";
-                        dora_send_output(dora_context,
-                                         const_cast<char*>(output_id.c_str()), output_id.length(),
-                                         reinterpret_cast<char*>(buffer), offset_out);
-                    }
-                }
-            }
             else if (input_id == "tick" || input_id == "query")
             {
                 if (g_config_received)
@@ -652,14 +561,17 @@ int main()
                             }
                             else
                             {
-                                // Position command with per-axis limits
+                                // Position/Velocity command with per-axis limits
+                                // hold_position: NaN for velocity control, actual position for position control
+                                // hold_velocity: target velocity (0 for pure position control)
+                                // kp_scale: 0 for velocity control, 1 for position control
+                                // kd_scale: typically 1
                                 double pos = g_axes[i].hold_position * g_axes[i].motdir;
-                                if (std::isnan(pos))
-                                {
-                                    std::cout << "[moteus_communication] WARNING: Axis " << i << " (device_id=" << static_cast<int>(g_axes[i].device_id)
-                                              << ") sending position_frame with NaN position!" << std::endl;
-                                }
-                                offset += build_position_frame(buffer + offset, g_axes[i].device_id, pos, 0.0,
+                                double vel = g_axes[i].hold_velocity * g_axes[i].motdir;
+
+                                offset += build_position_frame(buffer + offset, g_axes[i].device_id,
+                                                               pos, vel,
+                                                               g_axes[i].kp_scale, g_axes[i].kd_scale,
                                                                g_axes[i].velocity_limit,
                                                                g_axes[i].accel_limit,
                                                                g_axes[i].torque_limit);
@@ -740,11 +652,14 @@ int main()
                                 g_axes[j].current_position = result.position;
 
                                 // Initialize hold_position if NaN and delay has expired
+                                // Note: For velocity control axes, hold_position stays NaN (intentional)
                                 if (std::isnan(g_axes[j].hold_position) && !std::isnan(result.position) && g_axes[j].servo_on_delay == 0)
                                 {
-                                    g_axes[j].hold_position = result.position;
-                                    std::cout << "[moteus_communication] Axis " << j << " (device_id=" << static_cast<int>(g_axes[j].device_id)
-                                              << ") hold_position initialized to " << result.position << " rev" << std::endl;
+                                    // Only initialize once (check kp_scale to avoid re-initializing velocity control axes)
+                                    if (g_axes[j].kp_scale > 0.0)
+                                    {
+                                        g_axes[j].hold_position = result.position;
+                                    }
                                 }
 
                                 // Fault detection: Log only if fault changed

@@ -8,12 +8,25 @@ extern "C"
 #include <cstdlib>
 #include <vector>
 #include <sched.h>
+#include <chrono>
 
 #include "can_if.hpp"
 
 // Static axis configuration (set once on axis_config input)
 static std::vector<uint8_t> g_device_ids;
 static bool g_config_received = false;
+
+// Group boundary: device_id < GROUP_BOUNDARY goes to group1 (右足), >= GROUP_BOUNDARY goes to group2 (左足)
+// mimic_v2.json: 右足 = 50,60,70、左足 = 80,90,100
+static constexpr uint8_t GROUP_BOUNDARY = 80;
+
+// Parsed frame structure
+struct TxFrame {
+    uint32_t arb_id;
+    uint8_t len;
+    uint8_t data[64];
+    uint8_t device_id;
+};
 
 int main()
 {
@@ -74,6 +87,8 @@ int main()
 
     std::cout << "[canfd_txrx] Bound to " << can_if
               << ", RX timeout: " << rx_timeout_us << "us" << std::endl;
+    std::cout << "[canfd_txrx] Group split: device_id <" << static_cast<int>(GROUP_BOUNDARY)
+              << " (group1/右足), >=" << static_cast<int>(GROUP_BOUNDARY) << " (group2/左足)" << std::endl;
     std::cout << "[canfd_txrx] Waiting for axis_config..." << std::endl;
 
     while (true)
@@ -132,115 +147,141 @@ int main()
                 // Each frame: [4 bytes arb_id][1 byte len][data...]
                 if (g_config_received && data_len >= 1)
                 {
-                    static bool debug_printed = false;
-
                     uint8_t frame_count = static_cast<uint8_t>(data_ptr[0]);
                     size_t offset = 1;
 
-                    // Parse all frames and send them first (all TX before any RX)
-                    std::vector<uint32_t> tx_arb_ids;
-                    std::vector<uint32_t> expected_response_ids;
+                    // Record TX start time for cycle time measurement
+                    auto tx_start_time = std::chrono::steady_clock::now();
+
+                    // Parse all frames and split into two groups
+                    std::vector<TxFrame> group1_frames;  // device_id 1-3
+                    std::vector<TxFrame> group2_frames;  // device_id 4-6
 
                     for (uint8_t i = 0; i < frame_count && offset < data_len; ++i)
                     {
                         if (offset + 5 > data_len) break;
 
-                        uint32_t tx_arb_id;
-                        std::memcpy(&tx_arb_id, data_ptr + offset, 4);
+                        TxFrame frame;
+                        std::memcpy(&frame.arb_id, data_ptr + offset, 4);
                         offset += 4;
 
-                        uint8_t len = static_cast<uint8_t>(data_ptr[offset]);
+                        frame.len = static_cast<uint8_t>(data_ptr[offset]);
                         offset += 1;
 
-                        if (len > 64) len = 64;
-                        if (offset + len > data_len) break;
+                        if (frame.len > 64) frame.len = 64;
+                        if (offset + frame.len > data_len) break;
 
-                        // Debug: Print frame details (first time only)
-                        if (!debug_printed)
+                        std::memcpy(frame.data, data_ptr + offset, frame.len);
+                        offset += frame.len;
+
+                        // Extract device_id from arb_id (lower 7 bits)
+                        frame.device_id = frame.arb_id & 0x7F;
+
+                        // Split into groups based on device_id
+                        if (frame.device_id < GROUP_BOUNDARY)
                         {
-                            std::cout << "[canfd_txrx] TX frame " << static_cast<int>(i)
-                                      << ": arb_id=0x" << std::hex << tx_arb_id << std::dec
-                                      << ", len=" << static_cast<int>(len) << std::endl;
+                            group1_frames.push_back(frame);
+                        }
+                        else
+                        {
+                            group2_frames.push_back(frame);
                         }
 
-                        // Send frame immediately
-                        can.send(tx_arb_id, reinterpret_cast<uint8_t*>(data_ptr + offset), len);
-
-                        // Store expected response ID (device_id << 8)
-                        uint32_t device_id = tx_arb_id & 0x7F;
-                        expected_response_ids.push_back(device_id << 8);
-                        tx_arb_ids.push_back(tx_arb_id);
-
-                        offset += len;
                     }
 
-                    if (!debug_printed)
+                    // Collect all RX frames from both groups
+                    std::vector<CanInterface::RxFrame> all_rx_frames;
+                    int total_received = 0;
+
+                    // === Group 1: Send and receive (右足 device_id 1-3) ===
+                    if (!group1_frames.empty())
                     {
-                        std::cout << "[canfd_txrx] Expecting responses: ";
-                        for (size_t i = 0; i < expected_response_ids.size(); ++i)
+                        std::vector<uint32_t> expected_ids;
+                        for (const auto& frame : group1_frames)
                         {
-                            if (i > 0) std::cout << ", ";
-                            std::cout << "0x" << std::hex << expected_response_ids[i] << std::dec;
+                            can.send(frame.arb_id, frame.data, frame.len);
+                            expected_ids.push_back(static_cast<uint32_t>(frame.device_id) << 8);
                         }
-                        std::cout << std::endl;
-                        debug_printed = true;
-                    }
 
-                    // Now receive all responses
-                    if (!expected_response_ids.empty())
-                    {
                         std::vector<CanInterface::RxFrame> rx_frames;
-                        int64_t total_cycle_time_us = 0;
+                        int64_t rx_time_us = 0;
+                        int received = can.receiveMultiple(expected_ids, rx_frames, rx_time_us);
+                        total_received += received;
 
-                        int received = can.receiveMultiple(expected_response_ids, rx_frames, total_cycle_time_us);
-
-                        if (received > 0)
+                        for (auto& rx : rx_frames)
                         {
-                            // Build rx_frames output
-                            // Format: [1 byte frame_count][rx_frame1...][rx_frame2...]
-                            // Each rx_frame: [8 bytes timestamp][4 bytes arb_id][1 byte len][data...]
-                            uint8_t rx_buffer[4096];
-                            size_t rx_offset = 0;
-                            uint8_t rx_frame_count = 0;
-
-                            // Reserve space for frame count
-                            rx_offset = 1;
-
-                            for (size_t i = 0; i < rx_frames.size(); ++i)
+                            if (rx.len > 0)
                             {
-                                if (rx_frames[i].len > 0)
-                                {
-                                    std::memcpy(rx_buffer + rx_offset, &rx_frames[i].timestamp_ns, 8);
-                                    rx_offset += 8;
-
-                                    std::memcpy(rx_buffer + rx_offset, &rx_frames[i].arb_id, 4);
-                                    rx_offset += 4;
-
-                                    rx_buffer[rx_offset] = rx_frames[i].len;
-                                    rx_offset += 1;
-
-                                    std::memcpy(rx_buffer + rx_offset, rx_frames[i].data, rx_frames[i].len);
-                                    rx_offset += rx_frames[i].len;
-
-                                    rx_frame_count++;
-                                }
+                                all_rx_frames.push_back(rx);
                             }
-
-                            // Set frame count
-                            rx_buffer[0] = rx_frame_count;
-
-                            // Output rx_frames
-                            std::string output_id = "rx_frames";
-                            dora_send_output(dora_context,
-                                             const_cast<char*>(output_id.c_str()), output_id.length(),
-                                             reinterpret_cast<char*>(rx_buffer), rx_offset);
-
-                            // Output total cycle time
-                            output_id = "cycle_time_us";
-                            dora_send_output(dora_context,
-                                             const_cast<char*>(output_id.c_str()), output_id.length(),
-                                             reinterpret_cast<char*>(&total_cycle_time_us), sizeof(total_cycle_time_us));
                         }
+                    }
+
+                    // === Group 2: Send and receive (左足 device_id 4-6) ===
+                    if (!group2_frames.empty())
+                    {
+                        std::vector<uint32_t> expected_ids;
+                        for (const auto& frame : group2_frames)
+                        {
+                            can.send(frame.arb_id, frame.data, frame.len);
+                            expected_ids.push_back(static_cast<uint32_t>(frame.device_id) << 8);
+                        }
+
+                        std::vector<CanInterface::RxFrame> rx_frames;
+                        int64_t rx_time_us = 0;
+                        int received = can.receiveMultiple(expected_ids, rx_frames, rx_time_us);
+                        total_received += received;
+
+                        for (auto& rx : rx_frames)
+                        {
+                            if (rx.len > 0)
+                            {
+                                all_rx_frames.push_back(rx);
+                            }
+                        }
+                    }
+
+                    // Calculate total cycle time from TX start to RX complete
+                    auto tx_end_time = std::chrono::steady_clock::now();
+                    int64_t total_cycle_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        tx_end_time - tx_start_time).count();
+
+                    if (total_received > 0)
+                    {
+                        // Build rx_frames output
+                        // Format: [1 byte frame_count][rx_frame1...][rx_frame2...]
+                        // Each rx_frame: [8 bytes timestamp][4 bytes arb_id][1 byte len][data...]
+                        uint8_t rx_buffer[4096];
+                        size_t rx_offset = 1;  // Reserve first byte for frame count
+
+                        for (const auto& rx : all_rx_frames)
+                        {
+                            std::memcpy(rx_buffer + rx_offset, &rx.timestamp_ns, 8);
+                            rx_offset += 8;
+
+                            std::memcpy(rx_buffer + rx_offset, &rx.arb_id, 4);
+                            rx_offset += 4;
+
+                            rx_buffer[rx_offset] = rx.len;
+                            rx_offset += 1;
+
+                            std::memcpy(rx_buffer + rx_offset, rx.data, rx.len);
+                            rx_offset += rx.len;
+                        }
+
+                        rx_buffer[0] = static_cast<uint8_t>(all_rx_frames.size());
+
+                        // Output rx_frames
+                        std::string output_id = "rx_frames";
+                        dora_send_output(dora_context,
+                                         const_cast<char*>(output_id.c_str()), output_id.length(),
+                                         reinterpret_cast<char*>(rx_buffer), rx_offset);
+
+                        // Output total cycle time (TX start to RX complete, including timeouts)
+                        output_id = "cycle_time_us";
+                        dora_send_output(dora_context,
+                                         const_cast<char*>(output_id.c_str()), output_id.length(),
+                                         reinterpret_cast<char*>(&total_cycle_time_us), sizeof(total_cycle_time_us));
                     }
                 }
             }
