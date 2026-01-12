@@ -26,12 +26,10 @@ echo "  Press Ctrl+C to stop"
 echo "======================================"
 
 # Set RT capability on nodes (requires sudo password)
-CANFD_NODE="cpp/communications/canfd/canfd_txrx/canfd_txrx_node"
-MOTEUS_NODE="cpp/communications/comm_manager/moteus_communication/moteus_communication_node"
+MOTEUS_DRIVER_NODE="cpp/motor/moteus_driver/moteus_driver_node"
 STATE_NODE="cpp/state_machine/mimicv2_state_manager/mimicv2_state_manager_node"
 echo "[startup] Setting RT capability (sudo required)..."
-sudo setcap cap_sys_nice+ep "$CANFD_NODE"
-sudo setcap cap_sys_nice+ep "$MOTEUS_NODE"
+sudo setcap cap_sys_nice+ep "$MOTEUS_DRIVER_NODE"
 sudo setcap cap_sys_nice+ep "$STATE_NODE"
 
 # Start dora daemon (as normal user, not root)

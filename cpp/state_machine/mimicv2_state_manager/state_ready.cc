@@ -38,13 +38,6 @@ double interpolate(double start, double target, double t)
 
 void cmd_ready(void* dora_context)
 {
-    uint8_t all_mask = (1 << g_axes.size()) - 1;
-
-    if (g_current_state == State::SERVO_OFF)
-    {
-        send_servo_on(dora_context, all_mask);
-    }
-
     g_current_state = State::READY;
     g_holding = false;
     start_interpolation();
@@ -74,7 +67,7 @@ void tick_interpolation(void* dora_context)
             commands[i] = AxisCommand::position_control(pos);
         }
     }
-    send_position_commands(dora_context, commands);
+    send_motor_commands(dora_context, commands);
 
     uint8_t progress = static_cast<uint8_t>(t * 100);
     send_state_status(dora_context, progress);
@@ -104,5 +97,5 @@ void tick_ready_hold(void* dora_context)
             commands[i] = AxisCommand::position_control(g_axes[i].initial_position);
         }
     }
-    send_position_commands(dora_context, commands);
+    send_motor_commands(dora_context, commands);
 }

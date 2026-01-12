@@ -10,14 +10,14 @@ nodes:
       LD_LIBRARY_PATH: "${PWD}/lib"
 
   # Robot Control GUI - state machine control interface (dynamic node)
-  # Start with: ROBOT_CONFIG=robot_config/triple_axis.json python3 python/gui/robot_control/robot_control_gui.py
+  # Start with: ROBOT_CONFIG=robot_config/mimic_v2.json python3 python/gui/robot_control/robot_control_gui.py
   - id: robot_control_gui
     path: dynamic
     inputs:
       state_status: mimicv2_state_manager/state_status
       motor_display: mimicv2_state_manager/motor_display
       imu_data: imu_node/imu_data
-      cycle_time_us: canfd_txrx/cycle_time_us
+      cycle_time_us: moteus_driver/cycle_time_us
     outputs:
       - robot_config
       - state_command
@@ -26,54 +26,33 @@ nodes:
   - id: mimicv2_state_manager
     path: cpp/state_machine/mimicv2_state_manager/mimicv2_state_manager_node
     inputs:
-      tick: dora/timer/millis/4
+      tick: dora/timer/millis/5
       robot_config: robot_control_gui/robot_config
-      motor_status: moteus_communication/motor_status
+      motor_status: moteus_driver/motor_status
       state_command: robot_control_gui/state_command
       imu_data: imu_node/imu_data
     outputs:
       - robot_config_out
-      - servo_on
-      - servo_off
-      - position_commands
+      - motor_commands
       - state_status
       - motor_display
-      - query
       - set_position
     env:
       LD_LIBRARY_PATH: "${PWD}/lib"
 
-  # Moteus Communication - protocol handling + frame routing (command-driven)
-  - id: moteus_communication
-    path: cpp/communications/comm_manager/moteus_communication/moteus_communication_node
+  # Moteus Driver - unified motor control (protocol + CAN)
+  - id: moteus_driver
+    path: cpp/motor/moteus_driver/moteus_driver_node
     inputs:
-      query: mimicv2_state_manager/query
       robot_config: mimicv2_state_manager/robot_config_out
-      rx_frames: canfd_txrx/rx_frames
-      servo_on: mimicv2_state_manager/servo_on
-      servo_off: mimicv2_state_manager/servo_off
-      position_commands: mimicv2_state_manager/position_commands
+      motor_commands: mimicv2_state_manager/motor_commands
       set_position: mimicv2_state_manager/set_position
     outputs:
-      - axis_config
-      - can_frames
       - motor_status
-    env:
-      LD_LIBRARY_PATH: "${PWD}/lib"
-      RT_PRIORITY: "80"
-
-  # CANFD TX/RX - sends CAN frames and waits for response
-  - id: canfd_txrx
-    path: cpp/communications/canfd/canfd_txrx/canfd_txrx_node
-    inputs:
-      axis_config: moteus_communication/axis_config
-      can_frames: moteus_communication/can_frames
-    outputs:
-      - rx_frames
       - cycle_time_us
     env:
       LD_LIBRARY_PATH: "${PWD}/lib"
       CAN_INTERFACE: "can0"
-      RX_TIMEOUT_US: "8000"
+      RX_TIMEOUT_US: "4000"
       CPU_AFFINITY: "1"
       RT_PRIORITY: "80"

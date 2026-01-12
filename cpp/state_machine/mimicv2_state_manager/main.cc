@@ -40,8 +40,13 @@ static void handle_state_command(void* dora_context, const char* data, size_t le
     {
         case StateCommand::SERVO_OFF:
         {
-            uint8_t all_mask = (1 << g_axes.size()) - 1;
-            send_servo_off(dora_context, all_mask);
+            // Send servo_off to all axes
+            std::vector<AxisCommand> commands(g_axes.size());
+            for (size_t i = 0; i < g_axes.size(); ++i)
+            {
+                commands[i] = AxisCommand::servo_off();
+            }
+            send_motor_commands(dora_context, commands);
             g_interpolating = false;
             g_holding = false;
             g_current_state = State::SERVO_OFF;
@@ -88,6 +93,8 @@ static void handle_state_command(void* dora_context, const char* data, size_t le
     }
 }
 
+// New format from moteus_driver:
+// [1 byte count][per axis: pos(8) + vel(8) + torque(8) + mode(1) + fault(1)] = 26 bytes per axis
 static void handle_motor_status(void* dora_context, const char* data, size_t len)
 {
     if (!g_config_received || len < 1) return;
@@ -95,64 +102,56 @@ static void handle_motor_status(void* dora_context, const char* data, size_t len
     uint8_t count = static_cast<uint8_t>(data[0]);
     size_t offset = 1;
     bool fault_detected = false;
-    uint8_t valid_count = 0;  // Count axes with valid (non-zero) position
+    uint8_t valid_count = 0;
 
     for (uint8_t i = 0; i < count && i < g_axes.size(); ++i)
     {
-        if (offset + 50 > len) break;  // Updated: now 50 bytes per axis (added fault)
-
-        offset += 1;  // mode
+        if (offset + 26 > len) break;  // 26 bytes per axis
 
         double position;
         std::memcpy(&position, data + offset, sizeof(double));
         offset += sizeof(double);
 
-        offset += sizeof(double);  // velocity
-        offset += sizeof(double);  // d_current
-        offset += sizeof(double);  // q_current
+        offset += sizeof(double);  // velocity (skip)
 
         double torque;
         std::memcpy(&torque, data + offset, sizeof(double));
         offset += sizeof(double);
 
-        offset += sizeof(double);  // motor_temp
+        offset += 1;  // mode (skip)
 
         int8_t fault = static_cast<int8_t>(data[offset]);
-        offset += 1;  // fault
+        offset += 1;
 
-        // Count valid axes (position != 0 means we got a response)
+        // Count valid axes
         if (position != 0.0) valid_count++;
 
         g_axes[i].current_position = position;
         g_axes[i].current_torque = torque;
         g_axes[i].fault = static_cast<uint8_t>(fault);
 
-        // Detect fault and trigger STOP state
         if (fault != 0)
         {
             fault_detected = true;
         }
     }
 
-    // Log if not all axes received (only in STOP/READY states)
+    // Log if not all axes received
     if ((g_current_state == State::STOP || g_current_state == State::READY) && valid_count < g_axes.size())
     {
         std::cout << "[RX_MISS] valid=" << static_cast<int>(valid_count) << "/" << g_axes.size() << std::endl;
     }
 
-    // If any fault detected, transition to STOP state for safety
+    // Fault auto-transition to STOP
     if (fault_detected && g_current_state != State::STOP && g_current_state != State::SERVO_OFF)
     {
-        std::cout << "[state_manager] FAULT DETECTED - Transitioning to STOP state" << std::endl;
-
-        // Initialize hold positions to current positions
+        std::cout << "[state_manager] FAULT DETECTED - Transitioning to STOP" << std::endl;
         g_interpolating = false;
         g_holding = false;
         for (size_t i = 0; i < g_axes.size(); ++i)
         {
             g_hold_positions[i] = g_axes[i].current_position;
         }
-
         g_current_state = State::STOP;
         send_state_status(dora_context, 0);
     }
@@ -228,9 +227,7 @@ static void handle_tick(void* dora_context)
     {
         tick_run(dora_context);
     }
-
-    // Query AFTER position commands
-    send_query(dora_context);
+    // Note: send_query() removed - motor_commands triggers CAN automatically
 }
 
 int main()
@@ -256,8 +253,13 @@ int main()
             std::cout << "[state_manager] Stop signal" << std::endl;
             if (g_config_received)
             {
-                uint8_t all_mask = (1 << g_axes.size()) - 1;
-                send_servo_off(dora_context, all_mask);
+                // Send servo_off to all axes
+                std::vector<AxisCommand> commands(g_axes.size());
+                for (size_t i = 0; i < g_axes.size(); ++i)
+                {
+                    commands[i] = AxisCommand::servo_off();
+                }
+                send_motor_commands(dora_context, commands);
             }
             free_dora_event(event);
             break;

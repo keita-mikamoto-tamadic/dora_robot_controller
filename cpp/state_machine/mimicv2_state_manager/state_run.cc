@@ -45,7 +45,7 @@ void tick_run(void* dora_context)
                 commands[i] = AxisCommand::position_control(g_axes[i].initial_position);
             }
         }
-        send_position_commands(dora_context, commands);
+        send_motor_commands(dora_context, commands);
         return;
     }
 
@@ -76,5 +76,5 @@ void tick_run(void* dora_context)
             commands[i] = AxisCommand::position_control(g_axes[i].initial_position);
         }
     }
-    send_position_commands(dora_context, commands);
+    send_motor_commands(dora_context, commands);
 }

@@ -6,19 +6,12 @@
 
 void cmd_stop(void* dora_context)
 {
-    uint8_t all_mask = (1 << g_axes.size()) - 1;
-
     g_interpolating = false;
-    g_holding = true;  // Enable position commands in STOP state
+    g_holding = true;
 
     if (g_current_state == State::SERVO_OFF)
     {
-        // From SERVO_OFF: Send servo_on to enable servos
-        // moteus_communication will use servo_on_delay for safe startup
-        send_servo_on(dora_context, all_mask);
-
-        // Initialize hold_positions to NaN
-        // Will be set from current_position after servo_on_delay expires
+        // Initialize hold_positions to NaN (will hold current on first motor_status)
         for (size_t i = 0; i < g_axes.size(); ++i)
         {
             g_hold_positions[i] = std::numeric_limits<double>::quiet_NaN();
@@ -26,7 +19,7 @@ void cmd_stop(void* dora_context)
     }
     else
     {
-        // From other states (READY, RUN): Hold at current position immediately
+        // From other states: Hold at current position immediately
         for (size_t i = 0; i < g_axes.size(); ++i)
         {
             g_hold_positions[i] = g_axes[i].current_position;
@@ -40,5 +33,11 @@ void cmd_stop(void* dora_context)
 
 void tick_hold(void* dora_context)
 {
-    send_position_commands(dora_context, g_hold_positions);
+    // STOP状態では全軸STOPモード（現在位置保持）
+    std::vector<AxisCommand> commands(g_axes.size());
+    for (size_t i = 0; i < g_axes.size(); ++i)
+    {
+        commands[i] = AxisCommand::stop();
+    }
+    send_motor_commands(dora_context, commands);
 }

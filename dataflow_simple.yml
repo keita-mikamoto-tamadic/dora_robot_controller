@@ -1,0 +1,62 @@
+nodes:
+  # IMU
+  - id: imu_node
+    path: cpp/sensor/imu/sony/imu_node
+    inputs:
+      tick: dora/timer/millis/1
+    outputs:
+      - imu_data
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+
+  # CUI (別ターミナルで起動: ROBOT_CONFIG=robot_config/mimic_v2.json python3 python/simple_cui.py)
+  - id: cui
+    path: dynamic
+    inputs:
+      state_status: state_manager/state_status
+      motor_status: motor_node/motor_status
+      imu_data: imu_node/imu_data
+    outputs:
+      - robot_config
+      - state_command
+
+  # State Manager
+  - id: state_manager
+    path: cpp/simple/state_manager/state_manager
+    inputs:
+      tick: dora/timer/millis/4
+      robot_config: cui/robot_config
+      motor_status: motor_node/motor_status
+      state_command: cui/state_command
+      imu_data:
+        source: imu_node/imu_data
+        queue_size: 1
+    outputs:
+      - robot_config_out
+      - motor_commands
+      - state_status
+      - set_position
+      - debug_data
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+
+  # Motor Node
+  - id: motor_node
+    path: cpp/simple/motor_node/motor_node
+    inputs:
+      robot_config: state_manager/robot_config_out
+      motor_commands: state_manager/motor_commands
+      set_position: state_manager/set_position
+    outputs:
+      - motor_status
+    env:
+      LD_LIBRARY_PATH: "${PWD}/lib"
+      RT_PRIORITY: "80"
+
+  # Rerun Logger (別ターミナルで起動: python3 python/rerun_logger.py)
+  - id: rerun_logger
+    path: dynamic
+    inputs:
+      debug_data: state_manager/debug_data
+      state_status: state_manager/state_status
+      motor_status: motor_node/motor_status

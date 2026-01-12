@@ -1,0 +1,260 @@
+#include "can_interface.hpp"
+
+#include <iostream>
+#include <cstring>
+#include <chrono>
+
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <poll.h>
+
+CanInterface::CanInterface(const std::string& interface_name, int rx_timeout_us)
+    : interface_name_(interface_name)
+    , rx_timeout_us_(rx_timeout_us)
+    , sock_(-1)
+    , initialized_(false)
+{
+}
+
+CanInterface::~CanInterface()
+{
+    if (sock_ >= 0)
+    {
+        close(sock_);
+        sock_ = -1;
+    }
+}
+
+bool CanInterface::init()
+{
+    if (initialized_)
+    {
+        return true;
+    }
+
+    // Open SocketCAN
+    sock_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    if (sock_ < 0)
+    {
+        std::cerr << "[CanInterface] Failed to open CAN socket" << std::endl;
+        return false;
+    }
+
+    // Enable CAN FD
+    int enable_canfd = 1;
+    if (setsockopt(sock_, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable_canfd, sizeof(enable_canfd)) < 0)
+    {
+        std::cerr << "[CanInterface] Failed to enable CAN FD" << std::endl;
+        close(sock_);
+        sock_ = -1;
+        return false;
+    }
+
+    // Enable receiving own messages (for TX loopback detection)
+    int recv_own_msgs = 1;
+    if (setsockopt(sock_, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &recv_own_msgs, sizeof(recv_own_msgs)) < 0)
+    {
+        std::cerr << "[CanInterface] Warning: Failed to enable CAN_RAW_RECV_OWN_MSGS" << std::endl;
+    }
+
+    // Enable software timestamps
+    int timestamp_on = 1;
+    if (setsockopt(sock_, SOL_SOCKET, SO_TIMESTAMP, &timestamp_on, sizeof(timestamp_on)) < 0)
+    {
+        std::cerr << "[CanInterface] Warning: Failed to enable SO_TIMESTAMP" << std::endl;
+    }
+
+    // Bind to interface
+    struct ifreq ifr;
+    std::strncpy(ifr.ifr_name, interface_name_.c_str(), IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+    if (ioctl(sock_, SIOCGIFINDEX, &ifr) < 0)
+    {
+        std::cerr << "[CanInterface] Failed to get interface index for " << interface_name_ << std::endl;
+        close(sock_);
+        sock_ = -1;
+        return false;
+    }
+
+    struct sockaddr_can addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.can_family = AF_CAN;
+    addr.can_ifindex = ifr.ifr_ifindex;
+
+    if (bind(sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        std::cerr << "[CanInterface] Failed to bind CAN socket" << std::endl;
+        close(sock_);
+        sock_ = -1;
+        return false;
+    }
+
+    initialized_ = true;
+    std::cout << "[CanInterface] Initialized on " << interface_name_ << std::endl;
+    return true;
+}
+
+bool CanInterface::send(uint32_t arb_id, const uint8_t* data, uint8_t len)
+{
+    if (!initialized_)
+    {
+        std::cerr << "[CanInterface] Not initialized" << std::endl;
+        return false;
+    }
+
+    struct canfd_frame tx_frame;
+    std::memset(&tx_frame, 0, sizeof(tx_frame));
+
+    if (arb_id > 0x7FF)
+    {
+        tx_frame.can_id = arb_id | CAN_EFF_FLAG;
+    }
+    else
+    {
+        tx_frame.can_id = arb_id;
+    }
+
+    tx_frame.len = (len > 64) ? 64 : len;
+    tx_frame.flags = CANFD_BRS;
+    std::memcpy(tx_frame.data, data, tx_frame.len);
+
+    ssize_t nbytes = write(sock_, &tx_frame, sizeof(tx_frame));
+    if (nbytes < 0)
+    {
+        std::cerr << "[CanInterface] Failed to send CAN frame" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+int CanInterface::receiveMultiple(const std::vector<uint32_t>& expected_ids,
+                                   std::vector<RxFrame>& rx_frames)
+{
+    if (!initialized_)
+    {
+        std::cerr << "[CanInterface] Not initialized" << std::endl;
+        return 0;
+    }
+
+    size_t num_axes = expected_ids.size();
+    rx_frames.resize(num_axes);
+    for (auto& f : rx_frames)
+    {
+        f.timestamp_ns = 0;
+        f.arb_id = 0;
+        f.len = 0;
+    }
+
+    // Track which responses we've received
+    std::vector<bool> got_tx_loopback(num_axes, false);
+    std::vector<bool> got_rx_response(num_axes, false);
+
+    // Calculate TX arb IDs from expected response IDs
+    std::vector<uint32_t> tx_arb_ids(num_axes);
+    for (size_t i = 0; i < num_axes; ++i)
+    {
+        uint32_t device_id = expected_ids[i] >> 8;
+        tx_arb_ids[i] = 0x8000 | device_id;
+    }
+
+    int received_count = 0;
+
+    // Timeout calculation
+    int total_timeout_ms = static_cast<int>((rx_timeout_us_ + 999) / 1000);
+    if (total_timeout_ms < 1) total_timeout_ms = 1;
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(total_timeout_ms);
+
+    // Prepare for recvmsg
+    struct canfd_frame recv_frame;
+    struct iovec iov;
+    iov.iov_base = &recv_frame;
+    iov.iov_len = sizeof(recv_frame);
+
+    char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))];
+    struct msghdr msg;
+    std::memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctrlmsg;
+    msg.msg_controllen = sizeof(ctrlmsg);
+
+    struct pollfd pfd;
+    pfd.fd = sock_;
+    pfd.events = POLLIN;
+
+    while (static_cast<size_t>(received_count) < num_axes)
+    {
+        auto now = std::chrono::steady_clock::now();
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (remaining <= 0)
+        {
+            break;
+        }
+
+        int ret = poll(&pfd, 1, static_cast<int>(remaining));
+        if (ret <= 0)
+        {
+            break;
+        }
+
+        if (pfd.revents & POLLIN)
+        {
+            msg.msg_controllen = sizeof(ctrlmsg);
+            ssize_t rx_bytes = recvmsg(sock_, &msg, 0);
+
+            if (rx_bytes > 0)
+            {
+                uint32_t rx_arb_id = recv_frame.can_id & CAN_EFF_MASK;
+
+                // Extract timestamp
+                struct timeval tv = {0, 0};
+                for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+                     cmsg != NULL;
+                     cmsg = CMSG_NXTHDR(&msg, cmsg))
+                {
+                    if (cmsg->cmsg_level == SOL_SOCKET &&
+                        cmsg->cmsg_type == SO_TIMESTAMP)
+                    {
+                        std::memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
+                        break;
+                    }
+                }
+                int64_t frame_timestamp_ns = tv.tv_sec * 1000000000LL + tv.tv_usec * 1000LL;
+
+                // Check TX loopback
+                for (size_t i = 0; i < num_axes; ++i)
+                {
+                    if (rx_arb_id == tx_arb_ids[i] && !got_tx_loopback[i])
+                    {
+                        got_tx_loopback[i] = true;
+                        break;
+                    }
+                }
+
+                // Check RX response
+                for (size_t i = 0; i < num_axes; ++i)
+                {
+                    if (rx_arb_id == expected_ids[i] && !got_rx_response[i])
+                    {
+                        got_rx_response[i] = true;
+                        received_count++;
+
+                        rx_frames[i].timestamp_ns = frame_timestamp_ns;
+                        rx_frames[i].arb_id = rx_arb_id;
+                        rx_frames[i].len = recv_frame.len;
+                        std::memcpy(rx_frames[i].data, recv_frame.data, recv_frame.len);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return received_count;
+}

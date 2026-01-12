@@ -9,48 +9,18 @@ extern "C"
 #include <cstring>
 #include <vector>
 
-void send_servo_on(void* dora_context, uint8_t mask)
+// motor_commands を送信
+// Format: [1 byte count][per axis: mode(1) + position(8) + velocity(8) + kp(8) + kd(8)]
+void send_motor_commands(void* dora_context, const std::vector<AxisCommand>& commands)
 {
-    std::string output_id = "servo_on";
-    char data[1] = {static_cast<char>(mask)};
-    dora_send_output(dora_context,
-                     const_cast<char*>(output_id.c_str()), output_id.length(),
-                     data, 1);
-    std::cout << "[state_manager] Servo ON mask: 0x" << std::hex << static_cast<int>(mask) << std::dec << std::endl;
-}
-
-void send_servo_off(void* dora_context, uint8_t mask)
-{
-    std::string output_id = "servo_off";
-    char data[1] = {static_cast<char>(mask)};
-    dora_send_output(dora_context,
-                     const_cast<char*>(output_id.c_str()), output_id.length(),
-                     data, 1);
-    std::cout << "[state_manager] Servo OFF mask: 0x" << std::hex << static_cast<int>(mask) << std::dec << std::endl;
-}
-
-void send_position_commands(void* dora_context, const std::vector<double>& positions)
-{
-    // 旧フォーマット互換: 位置のみの場合はAxisCommandに変換
-    std::vector<AxisCommand> commands;
-    commands.reserve(positions.size());
-    for (const auto& pos : positions)
-    {
-        commands.push_back(AxisCommand::position_control(pos));
-    }
-    send_position_commands(dora_context, commands);
-}
-
-void send_position_commands(void* dora_context, const std::vector<AxisCommand>& commands)
-{
-    // 新フォーマット: [1 byte count][軸0: pos(8)+vel(8)+kp(8)+kd(8)][軸1...]
-    size_t per_axis = 4 * sizeof(double);  // position, velocity, kp_scale, kd_scale
+    size_t per_axis = 1 + 4 * sizeof(double);  // mode + position + velocity + kp + kd
     std::vector<uint8_t> buffer(1 + commands.size() * per_axis);
     size_t offset = 0;
 
     buffer[offset++] = static_cast<uint8_t>(commands.size());
     for (const auto& cmd : commands)
     {
+        buffer[offset++] = static_cast<uint8_t>(cmd.mode);
         std::memcpy(buffer.data() + offset, &cmd.position, sizeof(double));
         offset += sizeof(double);
         std::memcpy(buffer.data() + offset, &cmd.velocity, sizeof(double));
@@ -61,7 +31,7 @@ void send_position_commands(void* dora_context, const std::vector<AxisCommand>& 
         offset += sizeof(double);
     }
 
-    std::string output_id = "position_commands";
+    std::string output_id = "motor_commands";
     dora_send_output(dora_context,
                      const_cast<char*>(output_id.c_str()), output_id.length(),
                      reinterpret_cast<char*>(buffer.data()), offset);
@@ -69,8 +39,6 @@ void send_position_commands(void* dora_context, const std::vector<AxisCommand>& 
 
 void send_set_position(void* dora_context, const std::vector<double>& positions)
 {
-    // Format: [1 byte count][pos0 (8 bytes)][pos1 (8 bytes)]...
-    // Same format as position_commands but sent to set_position output
     std::vector<uint8_t> buffer(1 + positions.size() * sizeof(double));
     size_t offset = 0;
 
@@ -129,15 +97,6 @@ void send_motor_display(void* dora_context)
     dora_send_output(dora_context,
                      const_cast<char*>(output_id.c_str()), output_id.length(),
                      reinterpret_cast<char*>(buffer.data()), offset);
-}
-
-void send_query(void* dora_context)
-{
-    std::string query_id = "query";
-    uint8_t query_data[1] = {0xFF};
-    dora_send_output(dora_context,
-                     const_cast<char*>(query_id.c_str()), query_id.length(),
-                     reinterpret_cast<char*>(query_data), 1);
 }
 
 void forward_robot_config(void* dora_context, const char* data, size_t len)
