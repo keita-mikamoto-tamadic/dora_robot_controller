@@ -24,7 +24,7 @@ nodes:
   - id: state_manager
     path: cpp/simple/state_manager/state_manager
     inputs:
-      tick: dora/timer/millis/4
+      tick: dora/timer/millis/3
       robot_config: cui/robot_config
       motor_status: motor_node/motor_status
       state_command: cui/state_command

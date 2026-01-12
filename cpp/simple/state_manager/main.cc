@@ -38,7 +38,7 @@ static std::string g_config_json;
 // 補間
 static double g_interp_time = 3.0;      // 補間時間（秒）
 static double g_interp_progress = 0.0;  // 0.0〜1.0
-static const double TICK_SEC = 0.004;   // 5ms
+static const double TICK_SEC = 0.003;   // 5ms
 
 // IMU
 static double g_pitch = 0;
@@ -50,10 +50,16 @@ static double g_kp = 12.0;
 static double g_ki = 325.0;
 static double g_kd = 0.17;
 static double g_integral = 0.0;
-static const double DEAD_ZONE = 0.0;
-static const double D_DEAD_ZONE = 0.0;  // D項用不感帯（rad/s）
+static const double D_DEAD_ZONE = 0.1;        // D項用不感帯（rad/s）
 static const double MAX_INTEGRAL = 0.21;
 static const double MAX_WHEEL_SPEED = 30.0;
+
+// カスケードPID（速度→目標角度補正）
+static double g_velocity_integral = 0.0;
+static const double Kp_vel = 0.0001;   // 速度誤差への応答（非常にゆっくり）
+static const double Ki_vel = 0.00005;  // 定常ドリフト補正（非常にゆっくり）
+static const double MAX_VEL_INTEGRAL = 0.5;  // 積分制限
+static const double MAX_ANGLE_OFFSET = 0.05;  // 目標角度補正の制限（rad）約3度
 
 // ホイール軸インデックス
 static const int WHEEL_R = 2;  // wheel_r
@@ -256,6 +262,7 @@ void handle_state_command(void* ctx, const char* data, size_t len) {
                 g_state = RUN;
                 // PIDリセット
                 g_integral = 0.0;
+                g_velocity_integral = 0.0;
                 std::cout << "[state_manager] READY -> RUN" << std::endl;
             }
             break;
@@ -319,8 +326,23 @@ void handle_tick(void* ctx) {
         }
         send_debug_data(ctx, 0, 0, 0);
     } else if (g_state == RUN) {
-        // PID制御 -> ホイール速度
-        double error = g_target_pitch - g_pitch;
+        // === 外側ループ: 速度PID（倒立点自動調整） ===
+        // ホイール速度を0に保つための目標角度補正を計算
+        double wheel_velocity = (g_axes[WHEEL_R].velocity + g_axes[WHEEL_L].velocity) / 2.0;
+        double velocity_error = 0.0 - wheel_velocity;  // 目標速度は0
+
+        g_velocity_integral += velocity_error * TICK_SEC;
+        if (g_velocity_integral > MAX_VEL_INTEGRAL) g_velocity_integral = MAX_VEL_INTEGRAL;
+        if (g_velocity_integral < -MAX_VEL_INTEGRAL) g_velocity_integral = -MAX_VEL_INTEGRAL;
+
+        double angle_offset = Kp_vel * velocity_error + Ki_vel * g_velocity_integral;
+        if (angle_offset > MAX_ANGLE_OFFSET) angle_offset = MAX_ANGLE_OFFSET;
+        if (angle_offset < -MAX_ANGLE_OFFSET) angle_offset = -MAX_ANGLE_OFFSET;
+
+        // === 内側ループ: 角度PID ===
+        // 前傾(pitch>0)で正の出力 → ホイール前進
+        double effective_target = g_target_pitch + angle_offset;
+        double error = g_pitch - effective_target;
 
         // 積分項（アンチワインドアップ）
         g_integral += error * TICK_SEC;
@@ -328,16 +350,11 @@ void handle_tick(void* ctx) {
         if (g_integral < -MAX_INTEGRAL) g_integral = -MAX_INTEGRAL;
 
         // PID出力（D項はIMUの角速度を直接使用）
-        double d_term = (std::abs(g_pitch_rate) < D_DEAD_ZONE) ? 0.0 : g_pitch_rate;
+        // 傾きが増加中(pitch_rate>0)なら抑制 → 負の出力
+        double d_term = (std::abs(g_pitch_rate) < D_DEAD_ZONE) ? 0.0 : -g_pitch_rate;
         double control_output = g_kp * error + g_ki * g_integral + g_kd * d_term;
 
-        // pitch誤差が不感帯内なら出力0
-        double wheel_vel;
-        if (std::abs(error) < DEAD_ZONE) {
-            wheel_vel = 0.0;
-        } else {
-            wheel_vel = control_output;
-        }
+        double wheel_vel = control_output;
 
         // 速度制限
         if (wheel_vel > MAX_WHEEL_SPEED) wheel_vel = MAX_WHEEL_SPEED;
@@ -348,7 +365,8 @@ void handle_tick(void* ctx) {
 
         static int debug_cnt = 0;
         if (++debug_cnt >= 100) {
-            std::cout << "[RUN] pitch=" << g_pitch << " err=" << error << " vel=" << wheel_vel << std::endl;
+            std::cout << "[RUN] pitch=" << g_pitch << " err=" << error
+                      << " vel=" << wheel_vel << " offset=" << angle_offset << std::endl;
             debug_cnt = 0;
         }
 
@@ -356,8 +374,7 @@ void handle_tick(void* ctx) {
         for (size_t i = 0; i < g_axes.size(); i++) {
             if (i == WHEEL_R || i == WHEEL_L) {
                 // ホイール: 速度を直接target（rad/s）に設定
-                double sign = (i == WHEEL_L) ? -1.0 : -1.0;
-                g_axes[i].target = wheel_vel * sign;  // target = velocity (rad/s)
+                g_axes[i].target = wheel_vel;  // target = velocity (rad/s)
             } else {
                 // 股・膝: 初期位置保持
                 g_axes[i].target = g_axes[i].initial_position;
